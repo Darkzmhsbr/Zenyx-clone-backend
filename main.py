@@ -20,6 +20,12 @@ from datetime import datetime, timedelta
 from database import Lead  # Não esqueça de importar Lead!
 from force_migration import forcar_atualizacao_tabelas
 
+# 🆕 ADICIONAR ESTES IMPORTS PARA AUTENTICAÇÃO
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import timedelta
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
 
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, engine
@@ -50,6 +56,38 @@ app.add_middleware(
 )
 
 # =========================================================
+# 🔐 CONFIGURAÇÕES DE AUTENTICAÇÃO JWT
+# =========================================================
+SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production-2026")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 dias
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+
+# =========================================================
+# 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
+# =========================================================
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    full_name: str = None
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user_id: int
+    username: str
+
+class TokenData(BaseModel):
+    username: str = None
+
+# ========================================================
 # 1. FUNÇÃO DE CONEXÃO COM BANCO (TEM QUE SER A PRIMEIRA)
 # =========================================================
 def get_db():
@@ -57,6 +95,59 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    finally:
+        db.close()
+# =========================================================
+# 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO
+# =========================================================
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifica se a senha está correta"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """Gera hash da senha"""
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    """Cria token JWT"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Decodifica token e retorna usuário atual"""
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Não foi possível validar as credenciais",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        user_id: int = payload.get("user_id")
+        
+        if username is None:
+            raise credentials_exception
+            
+    except JWTError:
+        raise credentials_exception
+    
+    db = SessionLocal()
+    try:
+        from database import User
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if user is None:
+            raise credentials_exception
+        
+        return user
     finally:
         db.close()
 
@@ -1052,6 +1143,127 @@ def check_status(txid: str, db: Session = Depends(get_db)):
     pedido = db.query(Pedido).filter((Pedido.txid == txid) | (Pedido.transaction_id == txid)).first()
     if not pedido: return {"status": "not_found"}
     return {"status": pedido.status}
+
+# =========================================================
+# 🔐 ROTAS DE AUTENTICAÇÃO
+# =========================================================
+
+@app.post("/api/auth/register", response_model=Token, tags=["Autenticação"])
+async def register(user_data: UserCreate):
+    """
+    Registra um novo usuário no sistema
+    """
+    db = SessionLocal()
+    try:
+        from database import User
+        
+        # Verifica se usuário já existe
+        existing_user = db.query(User).filter(
+            (User.username == user_data.username) | (User.email == user_data.email)
+        ).first()
+        
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Usuário ou email já cadastrado")
+        
+        # Cria novo usuário
+        hashed_password = get_password_hash(user_data.password)
+        new_user = User(
+            username=user_data.username,
+            email=user_data.email,
+            password_hash=hashed_password,
+            full_name=user_data.full_name
+        )
+        
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        
+        # Gera token de acesso
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": new_user.username, "user_id": new_user.id},
+            expires_delta=access_token_expires
+        )
+        
+        print(f"✅ Novo usuário registrado: {new_user.username} (ID: {new_user.id})")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": new_user.id,
+            "username": new_user.username
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Erro ao registrar usuário: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao registrar usuário: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.post("/api/auth/login", response_model=Token, tags=["Autenticação"])
+async def login(user_data: UserLogin):
+    """
+    Realiza login e retorna token JWT
+    """
+    db = SessionLocal()
+    try:
+        from database import User
+        
+        # Busca usuário
+        user = db.query(User).filter(User.username == user_data.username).first()
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+        
+        # Verifica senha
+        if not verify_password(user_data.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+        
+        # Verifica se está ativo
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Usuário inativo")
+        
+        # Gera token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=access_token_expires
+        )
+        
+        print(f"✅ Login realizado: {user.username} (ID: {user.id})")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erro ao fazer login: {str(e)}")
+        raise HTTPException(status_code=500, detail="Erro ao fazer login")
+    finally:
+        db.close()
+
+
+@app.get("/api/auth/me", tags=["Autenticação"])
+async def get_me(current_user = Depends(get_current_user)):
+    """
+    Retorna informações do usuário logado
+    """
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+        "is_active": current_user.is_active
+    }
 
 # =========================================================
 # ⚙️ HELPER: CONFIGURAR MENU (COMANDOS)

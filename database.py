@@ -31,6 +31,27 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 # =========================================================
+# 👤 USUÁRIOS (NOVO - FASE 1 AUTENTICAÇÃO)
+# =========================================================
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
+    
+    is_active = Column(Boolean, default=True)
+    is_superuser = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # RELACIONAMENTO: Um usuário possui vários bots
+    bots = relationship("Bot", back_populates="owner")
+
+# =========================================================
 # ⚙️ CONFIGURAÇÕES GERAIS
 # =========================================================
 class SystemConfig(Base):
@@ -60,6 +81,10 @@ class Bot(Base):
     pushin_token = Column(String, nullable=True) 
 
     created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # nullable=True para migração
+    owner = relationship("User", back_populates="bots")
     
     # --- RELACIONAMENTOS (CASCADE) ---
     planos = relationship("PlanoConfig", back_populates="bot", cascade="all, delete-orphan")

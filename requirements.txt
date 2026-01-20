@@ -8,3 +8,5 @@ pytelegrambotapi
 python-multipart
 apscheduler
 pytz
+python-jose[cryptography]
+passlib[bcrypt]
