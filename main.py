@@ -520,7 +520,7 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
     }
     
     # URL DO RAILWAY FIXA (Garante que o Webhook chegue)
-    seus_dominio = "zenyx-gbs-testes-production.up.railway.app" 
+    seus_dominio = "https://zenyx-gbs-testesv1-production.up.railway.app" 
     
     payload = {
         "value": int(valor_float * 100), 
@@ -1016,7 +1016,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
 
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
         headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testes-production.up.railway.app")
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app/")
         if domain.startswith("https://"): domain = domain.replace("https://", "")
         
         payload = {
@@ -1150,7 +1150,7 @@ def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
                 old_tb.delete_webhook()
             except: pass
 
-            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testes-production.up.railway.app")
+            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testesv1-production.up.railway.app")
             if public_url.startswith("https://"): public_url = public_url.replace("https://", "")
             
             webhook_url = f"https://{public_url}/webhook/{dados.token}"
@@ -4216,6 +4216,12 @@ def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
 # =========================================================
 @app.on_event("startup")
 def on_startup():
+    init_db()
+    executar_migracao_v3()
+    executar_migracao_v4()
+    executar_migracao_v5()  # <--- ADICIONE ESTA LINHA
+    executar_migracao_v6() # <--- ADICIONE AQUI
+    
     print("Starting Container - Zenyx")
     
     # 1. Cria tabelas básicas se não existirem
@@ -4223,15 +4229,6 @@ def on_startup():
         init_db()
     except Exception as e:
         logger.error(f"Erro no init_db: {e}")
-
-    # 2. Migrações (COMENTADAS PARA NÃO RODAR TODA HORA)
-    # Descomente apenas se criar uma tabela nova no futuro
-    # try:
-    #     executar_migracao_v3()
-    #     executar_migracao_v4()
-    #     executar_migracao_v5()
-    #     executar_migracao_v6()
-    # except: pass
     
     logger.info("✅ Sistema Iniciado e Pronto!")
 
