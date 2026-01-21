@@ -8,6 +8,7 @@ import threading
 from telebot import types
 import json
 import uuid
+import shortuuid  # <--- ADICIONE ISSO NOS IMPORTS
 
 # --- IMPORTS CORRIGIDOS ---
 from sqlalchemy import func, desc, text
@@ -1114,6 +1115,21 @@ class TrackingLinkCreate(BaseModel):
     nome: str
     origem: Optional[str] = "outros" 
     codigo: Optional[str] = None
+
+# =========================================================
+# 📦 MODELOS DE RASTREAMENTO (RECUPERADOS)
+# =========================================================
+class TrackingFolderCreate(BaseModel):
+    name: str
+
+class TrackingLinkCreate(BaseModel):
+    name: str
+    folder_id: Optional[int] = None
+    bot_id: int
+    original_url: str
+    utm_source: Optional[str] = None
+    utm_medium: Optional[str] = None
+    utm_campaign: Optional[str] = None
 
 # --- MODELOS MINI APP (TEMPLATE) ---
 class MiniAppConfigUpdate(BaseModel):
@@ -2464,92 +2480,119 @@ def salvar_fluxo(
 # =========================================================
 # 🔗 ROTAS DE TRACKING (RASTREAMENTO)
 # =========================================================
+# =========================================================
+# 🔗 RASTREAMENTO (TRACKING) - RESTAURADO
+# =========================================================
+
+# 1. Listar Pastas
 @app.get("/api/admin/tracking/folders")
-def list_tracking_folders(db: Session = Depends(get_db)):
-    """Lista pastas com contagem de links E métricas somadas"""
-    try:
-        folders = db.query(TrackingFolder).all()
-        result = []
-        for f in folders:
-            # Conta links
-            link_count = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
-            
-            # Soma cliques e vendas de todos os links desta pasta
-            stats = db.query(
-                func.sum(TrackingLink.clicks).label('total_clicks'),
-                func.sum(TrackingLink.vendas).label('total_vendas')
-            ).filter(TrackingLink.folder_id == f.id).first()
-            
-            clicks = stats.total_clicks or 0
-            vendas = stats.total_vendas or 0
+def list_tracking_folders(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    folders = db.query(TrackingFolder).filter(TrackingFolder.owner_id == current_user.id).all()
+    return folders
 
-            result.append({
-                "id": f.id, 
-                "nome": f.nome, 
-                "plataforma": f.plataforma, 
-                "link_count": link_count,
-                "total_clicks": clicks,   # 🔥 Dado Real
-                "total_vendas": vendas,   # 🔥 Dado Real
-                "created_at": f.created_at
-            })
-        return result
-    except Exception as e:
-        logger.error(f"Erro ao listar pastas: {e}")
-        return []
-
+# 2. Criar Pasta
 @app.post("/api/admin/tracking/folders")
-def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
-    try:
-        nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
-        db.add(nova_pasta)
-        db.commit()
-        db.refresh(nova_pasta)
-        return {"status": "ok", "id": nova_pasta.id}
-    except Exception as e:
-        logger.error(f"Erro ao criar pasta: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
+def create_tracking_folder(data: TrackingFolderCreate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    nova_pasta = TrackingFolder(name=data.name, owner_id=current_user.id)
+    db.add(nova_pasta)
+    db.commit()
+    db.refresh(nova_pasta)
+    return nova_pasta
 
-@app.get("/api/admin/tracking/links/{folder_id}")
-def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
-    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
-
-@app.post("/api/admin/tracking/links")
-def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
-    # Gera código aleatório se não informado
-    if not dados.codigo:
-        import random, string
-        chars = string.ascii_lowercase + string.digits
-        dados.codigo = ''.join(random.choice(chars) for _ in range(8))
+# 3. Deletar Pasta
+@app.delete("/api/admin/tracking/folders/{folder_id}")
+def delete_tracking_folder(folder_id: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    folder = db.query(TrackingFolder).filter(TrackingFolder.id == folder_id, TrackingFolder.owner_id == current_user.id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Pasta não encontrada")
     
-    # Verifica duplicidade
-    exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
-    if exists:
-        raise HTTPException(400, "Este código de rastreamento já existe.")
-        
+    # Deleta links da pasta ou move para 'Sem Pasta'? Vamos deletar por enquanto ou setar null
+    db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).delete()
+    
+    db.delete(folder)
+    db.commit()
+    return {"message": "Pasta deletada"}
+
+# 4. Listar Links (Por Pasta ou Todos)
+@app.get("/api/admin/tracking/links/{folder_id}")
+def list_tracking_links(folder_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    query = db.query(TrackingLink).filter(TrackingLink.owner_id == current_user.id)
+    
+    if folder_id != "all":
+        if folder_id == "null":
+            query = query.filter(TrackingLink.folder_id == None)
+        else:
+            query = query.filter(TrackingLink.folder_id == int(folder_id))
+            
+    links = query.order_by(desc(TrackingLink.created_at)).all()
+    return links
+
+# 5. Criar Link de Rastreamento
+@app.post("/api/admin/tracking/links")
+def create_tracking_link(data: TrackingLinkCreate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    # Gerar Slug único (Ex: zenyx.com/r/AbCd12)
+    slug = shortuuid.ShortUUID().random(length=7)
+    
+    # Montar URL final com UTMs
+    final_url = data.original_url
+    params = []
+    if data.utm_source: params.append(f"utm_source={data.utm_source}")
+    if data.utm_medium: params.append(f"utm_medium={data.utm_medium}")
+    if data.utm_campaign: params.append(f"utm_campaign={data.utm_campaign}")
+    
+    if params:
+        separator = "&" if "?" in final_url else "?"
+        final_url += separator + "&".join(params)
+
     novo_link = TrackingLink(
-        folder_id=dados.folder_id,
-        bot_id=dados.bot_id,
-        nome=dados.nome,
-        codigo=dados.codigo,
-        origem=dados.origem
+        owner_id=current_user.id,
+        folder_id=data.folder_id,
+        bot_id=data.bot_id,
+        name=data.name,
+        slug=slug,
+        original_url=data.original_url,
+        final_url=final_url,
+        utm_source=data.utm_source,
+        utm_medium=data.utm_medium,
+        utm_campaign=data.utm_campaign
     )
+    
     db.add(novo_link)
     db.commit()
-    return {"status": "ok", "link": novo_link}
+    db.refresh(novo_link)
+    return novo_link
 
-@app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(fid: int, db: Session = Depends(get_db)):
-    # Apaga links dentro da pasta primeiro
-    db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
-    db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
+# 6. Deletar Link
+@app.delete("/api/admin/tracking/links/{link_id}")
+def delete_tracking_link(link_id: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    link = db.query(TrackingLink).filter(TrackingLink.id == link_id, TrackingLink.owner_id == current_user.id).first()
+    if not link:
+        raise HTTPException(status_code=404, detail="Link não encontrado")
+    
+    db.delete(link)
     db.commit()
-    return {"status": "deleted"}
+    return {"message": "Link deletado"}
 
-@app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(lid: int, db: Session = Depends(get_db)):
-    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
+# 🚀 ROTA DE REDIRECIONAMENTO (PÚBLICA)
+# É aqui que a mágica acontece: O usuário clica em zenyx.com/r/slug e é redirecionado
+@app.get("/r/{slug}")
+def redirect_tracking_link(slug: str, request: Request, db: Session = Depends(get_db)):
+    link = db.query(TrackingLink).filter(TrackingLink.slug == slug).first()
+    
+    if not link:
+        raise HTTPException(status_code=404, detail="Link inválido ou expirado")
+    
+    # ✅ Contabiliza o clique
+    link.clicks += 1
     db.commit()
-    return {"status": "deleted"}
+    
+    # 🕵️ Captura dados básicos (opcional - para analytics futuro)
+    user_agent = request.headers.get('user-agent')
+    # Poderia salvar em uma tabela TrackingLog aqui
+    
+    # ↪️ Redireciona
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url=link.final_url)
 
 # =========================================================
 # 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
