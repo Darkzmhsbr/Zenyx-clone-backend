@@ -4323,6 +4323,9 @@ def delete_remarketing_history(history_id: int, db: Session = Depends(get_db)):
 # =========================================================
 # 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA)
 # =========================================================
+# =========================================================
+# 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA E SUPORTE ADMIN)
+# =========================================================
 @app.get("/api/admin/dashboard/stats")
 def dashboard_stats(
     bot_id: Optional[int] = None, 
@@ -4335,8 +4338,8 @@ def dashboard_stats(
     Dashboard com filtros de data e bot.
     
     🆕 LÓGICA ESPECIAL PARA SUPER ADMIN:
-    - Se for super admin com split: calcula faturamento pelos splits
-    - Se for usuário normal: calcula pelos próprios pedidos
+    - Se for super admin com split: calcula faturamento pelos splits (Taxas)
+    - Se for usuário normal: calcula pelos próprios pedidos (Valor Bruto)
     
     ✅ CORREÇÃO: Retorna valores em CENTAVOS (frontend divide por 100)
     """
@@ -4370,21 +4373,28 @@ def dashboard_stats(
             # Visão de bot único
             bot = db.query(Bot).filter(
                 Bot.id == bot_id,
-                Bot.owner_id == current_user.id
+                # Admin vê qualquer bot, User só vê o seu
+                (Bot.owner_id == current_user.id) if not current_user.is_superuser else True
             ).first()
             
-            if not bot and not current_user.is_superuser:
+            if not bot:
                 raise HTTPException(status_code=404, detail="Bot não encontrado")
             
-            bots_ids = [bot_id] if bot else []
+            bots_ids = [bot_id]
             
         else:
-            # Visão global: todos os bots do usuário
-            user_bots = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
-            bots_ids = [b.id for b in user_bots]
+            # Visão global
+            if is_super_with_split:
+                # Admin vê TUDO (mas vamos filtrar se precisar depois)
+                # Para estatísticas de split, não precisamos filtrar bots específicos se for visão geral
+                bots_ids = [] # Lista vazia sinaliza "todos" na lógica abaixo
+            else:
+                # Usuário vê SEUS bots
+                user_bots = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
+                bots_ids = [b.id for b in user_bots]
         
-        if not bots_ids and not is_super_with_split:
-            # Usuário sem bots
+        # Se for usuário comum e não tiver bots, retorna zeros
+        if not is_super_with_split and not bots_ids and not bot_id:
             logger.info(f"📊 User {current_user.username}: Sem bots, retornando zeros")
             return {
                 "total_revenue": 0,
@@ -4402,29 +4412,37 @@ def dashboard_stats(
         # ============================================
         # 💰 CÁLCULO DE FATURAMENTO DO PERÍODO
         # ============================================
-        if is_super_with_split:
-            # SUPER ADMIN: Calcula pelos splits de TODAS as vendas
+        if is_super_with_split and not bot_id:
+            # SUPER ADMIN (Visão Geral): Calcula pelos splits de TODAS as vendas da plataforma
             vendas_periodo = db.query(Pedido).filter(
                 Pedido.status.in_(['approved', 'paid', 'active']),
                 Pedido.data_aprovacao >= start,
                 Pedido.data_aprovacao <= end
             ).all()
             
+            # Faturamento = Quantidade de Vendas * Taxa Fixa (ex: 60 centavos)
+            # Nota: Usamos a taxa configurada no perfil do admin como base
             taxa_centavos = current_user.taxa_venda or 60
             total_revenue = len(vendas_periodo) * taxa_centavos
             
             logger.info(f"💰 Super Admin - Período: {len(vendas_periodo)} vendas × R$ {taxa_centavos/100:.2f} = R$ {total_revenue/100:.2f} ({total_revenue} centavos)")
             
         else:
-            # USUÁRIO NORMAL: Soma dos próprios pedidos
-            vendas_periodo = db.query(Pedido).filter(
-                Pedido.bot_id.in_(bots_ids),
+            # USUÁRIO NORMAL (ou Admin vendo bot específico): Soma valor total dos pedidos
+            query = db.query(Pedido).filter(
                 Pedido.status.in_(['approved', 'paid', 'active']),
                 Pedido.data_aprovacao >= start,
                 Pedido.data_aprovacao <= end
-            ).all()
+            )
             
-            total_revenue = sum(int(p.valor * 100) for p in vendas_periodo)
+            if bots_ids:
+                query = query.filter(Pedido.bot_id.in_(bots_ids))
+            
+            vendas_periodo = query.all()
+            
+            # Se for admin vendo bot específico, ainda calcula como taxa ou valor cheio?
+            # Geralmente admin quer ver o faturamento do cliente, então valor cheio.
+            total_revenue = sum(int(p.valor * 100) if p.valor else 0 for p in vendas_periodo)
             
             logger.info(f"👤 User - Período: {len(vendas_periodo)} vendas = R$ {total_revenue/100:.2f} ({total_revenue} centavos)")
         
@@ -4433,74 +4451,56 @@ def dashboard_stats(
         # ============================================
         
         # Usuários ativos (assinaturas não expiradas)
-        if is_super_with_split:
-            # Super admin: conta TODOS os usuários ativos
-            active_users = db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active']),
-                Pedido.data_expiracao > datetime.utcnow()
-            ).count()
-        else:
-            # User normal: só dos próprios bots
-            active_users = db.query(Pedido).filter(
-                Pedido.bot_id.in_(bots_ids),
-                Pedido.status.in_(['approved', 'paid', 'active']),
-                Pedido.data_expiracao > datetime.utcnow()
-            ).count()
+        query_active = db.query(Pedido).filter(
+            Pedido.status.in_(['approved', 'paid', 'active']),
+            Pedido.data_expiracao > datetime.utcnow()
+        )
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_active = query_active.filter(Pedido.bot_id.in_(bots_ids))
+        active_users = query_active.count()
         
         # Vendas de hoje
         hoje_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
+        query_hoje = db.query(Pedido).filter(
+            Pedido.status.in_(['approved', 'paid', 'active']),
+            Pedido.data_aprovacao >= hoje_start
+        )
+        if not is_super_with_split or bot_id:
+            if bots_ids: query_hoje = query_hoje.filter(Pedido.bot_id.in_(bots_ids))
+            
+        vendas_hoje = query_hoje.all()
         
-        if is_super_with_split:
-            vendas_hoje = db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid']),
-                Pedido.data_aprovacao >= hoje_start
-            ).all()
+        if is_super_with_split and not bot_id:
             sales_today = len(vendas_hoje) * (current_user.taxa_venda or 60)
         else:
-            vendas_hoje = db.query(Pedido).filter(
-                Pedido.bot_id.in_(bots_ids),
-                Pedido.status.in_(['approved', 'paid']),
-                Pedido.data_aprovacao >= hoje_start
-            ).all()
-            sales_today = sum(int(p.valor * 100) for p in vendas_hoje)
+            sales_today = sum(int(p.valor * 100) if p.valor else 0 for p in vendas_hoje)
         
         # Leads do mês
         mes_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0)
-        
-        if is_super_with_split:
-            leads_mes = db.query(Lead).filter(
-                Lead.created_at >= mes_start
-            ).count()
-        else:
-            leads_mes = db.query(Lead).filter(
-                Lead.bot_id.in_(bots_ids),
-                Lead.created_at >= mes_start
-            ).count()
+        query_leads_mes = db.query(Lead).filter(Lead.created_at >= mes_start)
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_leads_mes = query_leads_mes.filter(Lead.bot_id.in_(bots_ids))
+        leads_mes = query_leads_mes.count()
         
         # Leads de hoje
-        if is_super_with_split:
-            leads_hoje = db.query(Lead).filter(
-                Lead.created_at >= hoje_start
-            ).count()
-        else:
-            leads_hoje = db.query(Lead).filter(
-                Lead.bot_id.in_(bots_ids),
-                Lead.created_at >= hoje_start
-            ).count()
+        query_leads_hoje = db.query(Lead).filter(Lead.created_at >= hoje_start)
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_leads_hoje = query_leads_hoje.filter(Lead.bot_id.in_(bots_ids))
+        leads_hoje = query_leads_hoje.count()
         
         # Ticket médio
         if vendas_periodo:
-            if is_super_with_split:
-                ticket_medio = (current_user.taxa_venda or 60)
+            if is_super_with_split and not bot_id:
+                ticket_medio = (current_user.taxa_venda or 60) # Para admin, ticket médio é a taxa fixa
             else:
-                ticket_medio = int(sum(p.valor * 100 for p in vendas_periodo) / len(vendas_periodo))
+                ticket_medio = int(total_revenue / len(vendas_periodo))
         else:
             ticket_medio = 0
         
         # Total de transações
         total_transacoes = len(vendas_periodo)
         
-        # Reembolsos (simulado - implementar depois)
+        # Reembolsos (Placeholder)
         reembolsos = 0
         
         # Taxa de conversão
@@ -4519,27 +4519,27 @@ def dashboard_stats(
             day_start = current_date.replace(hour=0, minute=0, second=0)
             day_end = current_date.replace(hour=23, minute=59, second=59)
             
-            if is_super_with_split:
-                vendas_dia = db.query(Pedido).filter(
-                    Pedido.status.in_(['approved', 'paid']),
-                    Pedido.data_aprovacao >= day_start,
-                    Pedido.data_aprovacao <= day_end
-                ).all()
-                # ✅ ATENÇÃO: Retorna em REAIS para o gráfico (não em centavos)
+            query_dia = db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.data_aprovacao >= day_start,
+                Pedido.data_aprovacao <= day_end
+            )
+            
+            if not is_super_with_split or bot_id:
+                if bots_ids: query_dia = query_dia.filter(Pedido.bot_id.in_(bots_ids))
+            
+            vendas_dia = query_dia.all()
+            
+            if is_super_with_split and not bot_id:
+                # Admin: Vendas * Taxa / 100 (para Reais)
                 valor_dia = len(vendas_dia) * ((current_user.taxa_venda or 60) / 100)
             else:
-                vendas_dia = db.query(Pedido).filter(
-                    Pedido.bot_id.in_(bots_ids),
-                    Pedido.status.in_(['approved', 'paid']),
-                    Pedido.data_aprovacao >= day_start,
-                    Pedido.data_aprovacao <= day_end
-                ).all()
-                # ✅ ATENÇÃO: Retorna em REAIS para o gráfico (não em centavos)
-                valor_dia = sum(p.valor for p in vendas_dia)
+                # User: Soma dos valores
+                valor_dia = sum(p.valor for p in vendas_dia) if vendas_dia else 0
             
             chart_data.append({
                 "name": current_date.strftime("%d/%m"),
-                "value": round(valor_dia, 2)  # ✅ Em REAIS (já dividido)
+                "value": round(valor_dia, 2)  # ✅ Em REAIS
             })
             
             current_date += timedelta(days=1)
@@ -4556,7 +4556,7 @@ def dashboard_stats(
             "total_transacoes": total_transacoes,
             "reembolsos": reembolsos,
             "taxa_conversao": taxa_conversao,
-            "chart_data": chart_data  # ✅ EM REAIS (para gráfico)
+            "chart_data": chart_data  # ✅ EM REAIS
         }
         
     except Exception as e:
@@ -4804,6 +4804,9 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
+# =========================================================
+# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
+# =========================================================
 @app.get("/api/profile/stats")
 def get_profile_stats(
     db: Session = Depends(get_db),
@@ -4813,7 +4816,7 @@ def get_profile_stats(
     Retorna estatísticas do perfil do usuário logado.
     
     🆕 LÓGICA ESPECIAL PARA SUPER ADMIN:
-    - Se for super admin com pushin_pay_id: calcula faturamento pelos splits
+    - Se for super admin com pushin_pay_id: calcula faturamento pelos splits (Todas as vendas * taxa)
     - Se for usuário normal: calcula pelos próprios pedidos
     
     ✅ CORREÇÃO: Evita lazy loading usando queries explícitas
@@ -4835,7 +4838,7 @@ def get_profile_stats(
             # 💰 CÁLCULO ESPECIAL PARA SUPER ADMIN (SPLIT)
             # ============================================
             
-            # 1. Conta TODAS as vendas aprovadas do sistema
+            # 1. Conta TODAS as vendas aprovadas da PLATAFORMA INTEIRA
             total_vendas_sistema = db.query(Pedido).filter(
                 Pedido.status.in_(['approved', 'paid', 'active'])
             ).count()
@@ -4849,12 +4852,11 @@ def get_profile_stats(
             
             logger.info(f"💰 Super Admin {current_user.username}: {total_vendas_sistema} vendas × R$ {taxa_centavos/100:.2f} = R$ {total_revenue/100:.2f} (retornando {total_revenue} centavos)")
             
-            # Total de bots (✅ QUERY EXPLÍCITA - NÃO USA current_user.bots)
-            total_bots = db.query(Bot).filter(Bot.owner_id == user_id).count()
+            # Total de bots da plataforma (Visão Macro)
+            total_bots = db.query(Bot).count()
             
-            # Buscar IDs dos bots (✅ QUERY EXPLÍCITA)
-            user_bots = db.query(Bot.id).filter(Bot.owner_id == user_id).all()
-            bots_ids_user = [bot.id for bot in user_bots]
+            # Total de membros da plataforma
+            total_members = db.query(User).count()
             
         else:
             # ============================================
@@ -4881,29 +4883,18 @@ def get_profile_stats(
             ).all()
             
             # Calcula revenue em centavos
-            total_revenue = sum(int(p.valor * 100) for p in pedidos_aprovados)
+            total_revenue = sum(int(p.valor * 100) if p.valor else 0 for p in pedidos_aprovados)
             total_sales = len(pedidos_aprovados)
             
             logger.info(f"👤 User {current_user.username}: {total_sales} vendas = R$ {total_revenue/100:.2f} (retornando {total_revenue} centavos)")
             
-            # Total de bots
+            # Total de bots do usuário
             total_bots = len(bots_ids)
-            bots_ids_user = bots_ids
-        
-        # ============================================
-        # 📊 ESTATÍSTICAS COMUNS (TODOS OS USUÁRIOS)
-        # ============================================
-        
-        # Total de membros (leads + pedidos únicos)
-        total_leads = db.query(Lead).filter(
-            Lead.bot_id.in_(bots_ids_user)
-        ).count() if bots_ids_user else 0
-        
-        total_pedidos_unicos = db.query(Pedido.telegram_id).filter(
-            Pedido.bot_id.in_(bots_ids_user)
-        ).distinct().count() if bots_ids_user else 0
-        
-        total_members = total_leads + total_pedidos_unicos
+            
+            # Total de membros dos bots dele
+            total_leads = db.query(Lead).filter(Lead.bot_id.in_(bots_ids)).count()
+            total_pedidos_unicos = db.query(Pedido.telegram_id).filter(Pedido.bot_id.in_(bots_ids)).distinct().count()
+            total_members = total_leads + total_pedidos_unicos
         
         logger.info(f"📊 Retornando: bots={total_bots}, members={total_members}, revenue={total_revenue}, sales={total_sales}")
         
