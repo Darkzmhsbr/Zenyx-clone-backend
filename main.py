@@ -154,6 +154,27 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     finally:
         db.close()
 
+# =========================================================
+# 🔒 FUNÇÃO HELPER: VERIFICAR PROPRIEDADE DO BOT
+# =========================================================
+def verificar_bot_pertence_usuario(bot_id: int, user_id: int, db: Session):
+    """
+    Verifica se o bot pertence ao usuário.
+    Retorna o bot se pertencer, caso contrário levanta HTTPException 404.
+    """
+    bot = db.query(Bot).filter(
+        Bot.id == bot_id,
+        Bot.owner_id == user_id
+    ).first()
+    
+    if not bot:
+        raise HTTPException(
+            status_code=404, 
+            detail="Bot não encontrado ou você não tem permissão para acessá-lo"
+        )
+    
+    return bot
+
 # ============================================================
 # 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
 # ============================================================
@@ -958,7 +979,16 @@ class RemarketingSend(BaseModel):
     specific_user_id: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/remarketing/send")
-def send_remarketing(bot_id: int, data: RemarketingSend, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def send_remarketing(
+    bot_id: int, 
+    data: RemarketingSend, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+
     try:
         logger.info(f"📢 Iniciando Remarketing para Bot {bot_id} | Target: {data.target}")
         
@@ -1288,7 +1318,11 @@ def configurar_menu_bot(token):
 # ===========================
 
 @app.post("/api/admin/bots", response_model=BotResponse)
-def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
+def criar_bot(
+    bot_data: BotCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     if db.query(Bot).filter(Bot.token == bot_data.token).first():
         raise HTTPException(status_code=400, detail="Token já cadastrado.")
 
@@ -1318,11 +1352,14 @@ def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
         id_canal_vip=bot_data.id_canal_vip,
         status=status,
         admin_principal_id=bot_data.admin_principal_id,
-        suporte_username=bot_data.suporte_username # 🔥 SALVA
+        suporte_username=bot_data.suporte_username,
+        owner_id=current_user.id  # 🔒 ATRIBUI AO USUÁRIO ATUAL
     )
     db.add(novo_bot)
     db.commit()
     db.refresh(novo_bot)
+    
+    logger.info(f"✅ Bot criado: {novo_bot.nome} (Owner: {current_user.username})")
     
     return {
         "id": novo_bot.id,
@@ -1389,9 +1426,13 @@ def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
-def toggle_bot(bot_id: int, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot: raise HTTPException(404, "Bot não encontrado")
+def toggle_bot(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE PERTENCE AO USUÁRIO
+    bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
     # Inverte o status
     novo_status = "ativo" if bot.status != "ativo" else "pausado"
@@ -1401,21 +1442,25 @@ def toggle_bot(bot_id: int, db: Session = Depends(get_db)):
     # 🔔 Notifica Admin (EM HTML)
     try:
         emoji = "🟢" if novo_status == "ativo" else "🔴"
-        # 🔥 Texto formatado com tags HTML
         msg = f"{emoji} <b>STATUS DO BOT ALTERADO</b>\n\nO bot <b>{bot.nome}</b> agora está: <b>{novo_status.upper()}</b>"
         notificar_admin_principal(bot, msg)
     except Exception as e:
         logger.error(f"Erro ao notificar admin sobre toggle: {e}")
+    
+    logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner: {current_user.username})")
     
     return {"status": novo_status}
 
 # --- NOVA ROTA: EXCLUIR BOT ---
 # --- NOVA ROTA: EXCLUIR BOT (COM LIMPEZA TOTAL) ---
 @app.delete("/api/admin/bots/{bot_id}")
-def deletar_bot(bot_id: int, db: Session = Depends(get_db)):
-    bot_db = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot_db:
-        raise HTTPException(status_code=404, detail="Bot não encontrado")
+def deletar_bot(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE PERTENCE AO USUÁRIO
+    bot_db = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
     try:
         # 1. Tenta remover o Webhook do Telegram para limpar no servidor deles
@@ -1423,7 +1468,7 @@ def deletar_bot(bot_id: int, db: Session = Depends(get_db)):
             tb = telebot.TeleBot(bot_db.token)
             tb.delete_webhook()
         except:
-            pass # Se der erro (ex: token inválido), continua e apaga do banco
+            pass  # Se der erro (ex: token inválido), continua e apaga do banco
         
         # 2. LIMPEZA PESADA (Exclui manualmente os dependentes para evitar erro de integridade)
         # Apaga PEDIDOS vinculados
@@ -1439,11 +1484,12 @@ def deletar_bot(bot_id: int, db: Session = Depends(get_db)):
         db.delete(bot_db)
         db.commit()
         
-        logger.info(f"🗑️ Bot {bot_id} e todos os seus dados foram excluídos com sucesso.")
+        logger.info(f"🗑 Bot {bot_id} e todos os seus dados foram excluídos com sucesso (Owner: {current_user.username})")
+        
         return {"status": "deleted", "msg": "Bot e todos os dados vinculados removidos com sucesso"}
         
     except Exception as e:
-        db.rollback() # Desfaz se der erro no meio do caminho
+        db.rollback()  # Desfaz se der erro no meio do caminho
         logger.error(f"Erro ao deletar bot {bot_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Erro interno ao excluir bot: {str(e)}")
 
@@ -1451,21 +1497,33 @@ def deletar_bot(bot_id: int, db: Session = Depends(get_db)):
 # 🛡️ GESTÃO DE ADMINISTRADORES (FASE 2 - COM EDIÇÃO)
 # =========================================================
 
+# =========================================================
+# 🛡️ GESTÃO DE ADMINISTRADORES (BLINDADO)
+# =========================================================
+
 @app.get("/api/admin/bots/{bot_id}/admins")
-def listar_admins(bot_id: int, db: Session = Depends(get_db)):
-    """Lista todos os admins de um bot específico"""
+def listar_admins(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
     admins = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).all()
     return admins
 
 @app.post("/api/admin/bots/{bot_id}/admins")
-def adicionar_admin(bot_id: int, dados: BotAdminCreate, db: Session = Depends(get_db)):
-    """Adiciona um novo admin ao bot"""
-    # Verifica se o bot existe
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot:
-        raise HTTPException(status_code=404, detail="Bot não encontrado")
+def adicionar_admin(
+    bot_id: int, 
+    dados: BotAdminCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # Verifica se já é admin
+    # Verifica duplicidade
     existente = db.query(BotAdmin).filter(
         BotAdmin.bot_id == bot_id, 
         BotAdmin.telegram_id == dados.telegram_id
@@ -1474,59 +1532,50 @@ def adicionar_admin(bot_id: int, dados: BotAdminCreate, db: Session = Depends(ge
     if existente:
         raise HTTPException(status_code=400, detail="Este ID já é administrador deste bot.")
     
-    novo_admin = BotAdmin(
-        bot_id=bot_id,
-        telegram_id=dados.telegram_id,
-        nome=dados.nome
-    )
+    novo_admin = BotAdmin(bot_id=bot_id, telegram_id=dados.telegram_id, nome=dados.nome)
     db.add(novo_admin)
     db.commit()
     db.refresh(novo_admin)
     return novo_admin
 
-# 🔥 [NOVO] Rota para Editar Admin Existente
 @app.put("/api/admin/bots/{bot_id}/admins/{admin_id}")
-def atualizar_admin(bot_id: int, admin_id: int, dados: BotAdminCreate, db: Session = Depends(get_db)):
-    """Atualiza o ID ou Nome de um administrador existente"""
-    admin_db = db.query(BotAdmin).filter(
-        BotAdmin.id == admin_id,
-        BotAdmin.bot_id == bot_id
-    ).first()
+def atualizar_admin(
+    bot_id: int, 
+    admin_id: int, 
+    dados: BotAdminCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    admin_db = db.query(BotAdmin).filter(BotAdmin.id == admin_id, BotAdmin.bot_id == bot_id).first()
     if not admin_db:
         raise HTTPException(status_code=404, detail="Administrador não encontrado")
     
-    # Verifica duplicidade (se mudar o ID para um que já existe)
-    if dados.telegram_id != admin_db.telegram_id:
-        existente = db.query(BotAdmin).filter(
-            BotAdmin.bot_id == bot_id, 
-            BotAdmin.telegram_id == dados.telegram_id
-        ).first()
-        if existente:
-            raise HTTPException(status_code=400, detail="Este Telegram ID já está em uso.")
-
-    # Atualiza os dados
+    # Atualiza dados
     admin_db.telegram_id = dados.telegram_id
     admin_db.nome = dados.nome
-    
     db.commit()
-    db.refresh(admin_db)
     return admin_db
 
 @app.delete("/api/admin/bots/{bot_id}/admins/{telegram_id}")
-def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
-    """Remove um admin pelo Telegram ID"""
-    admin_db = db.query(BotAdmin).filter(
-        BotAdmin.bot_id == bot_id,
-        BotAdmin.telegram_id == telegram_id
-    ).first()
+def remover_admin(
+    bot_id: int, 
+    telegram_id: str, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    admin_db = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id, BotAdmin.telegram_id == telegram_id).first()
     if not admin_db:
         raise HTTPException(status_code=404, detail="Administrador não encontrado")
     
     db.delete(admin_db)
     db.commit()
-    return {"status": "deleted", "msg": "Administrador removido com sucesso"}
+    return {"status": "deleted"}
 
 # --- NOVA ROTA: LISTAR BOTS ---
 
@@ -1540,12 +1589,18 @@ def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
 # ============================================================
 
 @app.get("/api/admin/bots")
-def listar_bots(db: Session = Depends(get_db)):
+def listar_bots(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     """
     🔥 [CORRIGIDO] Lista bots + Revenue (Pagos/Expirados) + Suporte Username
+    🔒 PROTEGIDO: Apenas bots do usuário logado
     """
-    bots = db.query(Bot).all()
+    # 🔒 FILTRA APENAS BOTS DO USUÁRIO
+    bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
     
+    # ... RESTO DO CÓDIGO PERMANECE IGUAL (não mude nada abaixo daqui)
     result = []
     for bot in bots:
         # 1. CONTAGEM DE LEADS ÚNICOS
@@ -1578,7 +1633,7 @@ def listar_bots(db: Session = Depends(get_db)):
             "username": bot.username or None,
             "id_canal_vip": bot.id_canal_vip,
             "admin_principal_id": bot.admin_principal_id,
-            "suporte_username": bot.suporte_username, # 🔥 AQUI: Retorna o campo para o Front
+            "suporte_username": bot.suporte_username,
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
@@ -1602,41 +1657,58 @@ def listar_bots(db: Session = Depends(get_db)):
 
 # 1. LISTAR PLANOS
 @app.get("/api/admin/bots/{bot_id}/plans")
-def list_plans(bot_id: int, db: Session = Depends(get_db)):
+def list_plans(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE IGUAL
     planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
     return planos
 
 # 2. CRIAR PLANO (CORRIGIDO)
 @app.post("/api/admin/bots/{bot_id}/plans")
-async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
+async def create_plan(
+    bot_id: int, 
+    req: Request, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE EXATAMENTE IGUAL (NÃO MUDE NADA ABAIXO)
     try:
         data = await req.json()
         logger.info(f"📝 Criando plano para Bot {bot_id}: {data}")
         
         # Tenta pegar preco_original, se não tiver, usa 0.0
         preco_orig = float(data.get("preco_original", 0.0))
+        
         # Se o preço original for 0, define como o dobro do atual (padrão de marketing)
         if preco_orig == 0:
             preco_orig = float(data.get("preco_atual", 0.0)) * 2
-
+        
         novo_plano = PlanoConfig(
             bot_id=bot_id,
             nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
             descricao=data.get("descricao", f"Acesso de {data.get('dias_duracao')} dias"),
             preco_atual=float(data.get("preco_atual", 0.0)),
-            # Tenta usar 'preco_cheio' se 'preco_original' falhar (adaptação ao banco)
-            preco_cheio=preco_orig, 
+            preco_cheio=preco_orig,
             dias_duracao=int(data.get("dias_duracao", 30)),
-            key_id=f"plan_{bot_id}_{int(time.time())}" # Garante chave única
+            key_id=f"plan_{bot_id}_{int(time.time())}"
         )
         
         db.add(novo_plano)
         db.commit()
         db.refresh(novo_plano)
+        
         return novo_plano
-
+        
     except TypeError as te:
-        # Se der erro de coluna inexistente, tenta criar sem o campo problemático
         logger.warning(f"⚠️ Tentando criar plano sem 'preco_cheio' devido a erro: {te}")
         db.rollback()
         try:
@@ -1655,17 +1727,25 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         except Exception as e2:
             logger.error(f"Erro fatal ao criar plano: {e2}")
             raise HTTPException(status_code=500, detail=str(e2))
-            
     except Exception as e:
         logger.error(f"Erro genérico ao criar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 3. EDITAR PLANO (ROTA UNIFICADA)
 @app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
-async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
+async def update_plan(
+    bot_id: int, 
+    plano_id: int, 
+    req: Request, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
     try:
         data = await req.json()
-        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data}")
+        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data} (Owner: {current_user.username})")
         
         plano = db.query(PlanoConfig).filter(
             PlanoConfig.id == plano_id, 
@@ -1684,7 +1764,11 @@ async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = De
         
         db.commit()
         db.refresh(plano)
+        
+        logger.info(f"✅ Plano {plano_id} atualizado com sucesso")
+        
         return plano
+        
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -1692,36 +1776,62 @@ async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = De
         raise HTTPException(status_code=500, detail=str(e))
 
 # 4. DELETAR PLANO (COM SEGURANÇA)
-@app.delete("/api/admin/bots/{bot_id}/plans/{plano_id}")
-def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
+@app.delete("/api/admin/plans/{pid}")
+def del_plano(
+    pid: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     try:
-        plano = db.query(PlanoConfig).filter(
-            PlanoConfig.id == plano_id, 
-            PlanoConfig.bot_id == bot_id
-        ).first()
+        # 1. Busca o plano
+        p = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
+        if not p:
+            return {"status": "deleted", "msg": "Plano não existia"}
         
-        if not plano:
-            raise HTTPException(status_code=404, detail="Plano não encontrado.")
-            
-        # Desvincula de campanhas e pedidos para evitar erro de integridade
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == plano_id).update({RemarketingCampaign.plano_id: None})
-        db.query(Pedido).filter(Pedido.plano_id == plano_id).update({Pedido.plano_id: None})
+        # 🔒 VERIFICA SE O BOT DO PLANO PERTENCE AO USUÁRIO
+        verificar_bot_pertence_usuario(p.bot_id, current_user.id, db)
         
-        db.delete(plano)
+        # 2. Desvincula de Campanhas de Remarketing (Para não travar)
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == pid).update(
+            {RemarketingCampaign.plano_id: None},
+            synchronize_session=False
+        )
+        
+        # 3. Desvincula de Pedidos/Vendas (Para manter o histórico mas permitir deletar)
+        db.query(Pedido).filter(Pedido.plano_id == pid).update(
+            {Pedido.plano_id: None},
+            synchronize_session=False
+        )
+        
+        # 4. Deleta o plano
+        db.delete(p)
         db.commit()
+        
+        logger.info(f"🗑️ Plano deletado: {pid} (Owner: {current_user.username})")
+        
         return {"status": "deleted"}
+        
     except Exception as e:
-        logger.error(f"Erro ao deletar plano: {e}")
-        raise HTTPException(status_code=500, detail="Erro ao deletar plano.")
+        logger.error(f"Erro ao deletar plano {pid}: {e}")
+        raise HTTPException(status_code=400, detail=f"Erro ao deletar: {str(e)}")
 
 # =========================================================
 # 🛒 ORDER BUMP API
 # =========================================================
+# =========================================================
+# 🛒 ORDER BUMP API (BLINDADO)
+# =========================================================
 @app.get("/api/admin/bots/{bot_id}/order-bump")
-def get_order_bump(bot_id: int, db: Session = Depends(get_db)):
+def get_order_bump(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
     bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
     if not bump:
-        # Retorna objeto vazio padrão se não existir
         return {
             "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
             "msg_texto": "", "msg_media": "", 
@@ -1730,9 +1840,16 @@ def get_order_bump(bot_id: int, db: Session = Depends(get_db)):
     return bump
 
 @app.post("/api/admin/bots/{bot_id}/order-bump")
-def save_order_bump(bot_id: int, dados: OrderBumpCreate, db: Session = Depends(get_db)):
-    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+def save_order_bump(
+    bot_id: int, 
+    dados: OrderBumpCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
     if not bump:
         bump = OrderBumpConfig(bot_id=bot_id)
         db.add(bump)
@@ -1741,15 +1858,14 @@ def save_order_bump(bot_id: int, dados: OrderBumpCreate, db: Session = Depends(g
     bump.nome_produto = dados.nome_produto
     bump.preco = dados.preco
     bump.link_acesso = dados.link_acesso
-    bump.autodestruir = dados.autodestruir  # <--- ADICIONE AQUI
+    bump.autodestruir = dados.autodestruir
     bump.msg_texto = dados.msg_texto
     bump.msg_media = dados.msg_media
     bump.btn_aceitar = dados.btn_aceitar
     bump.btn_recusar = dados.btn_recusar
     
     db.commit()
-    db.refresh(bump)
-    return {"status": "ok", "msg": "Order Bump salvo com sucesso"}
+    return {"status": "ok"}
 
 # =========================================================
 # 🗑️ ROTA DELETAR PLANO (COM DESVINCULAÇÃO SEGURA)
@@ -1786,36 +1902,52 @@ def del_plano(pid: int, db: Session = Depends(get_db)):
 
 # --- ROTA NOVA: ATUALIZAR PLANO ---
 @app.put("/api/admin/plans/{plan_id}")
-# --- ROTA NOVA: ATUALIZAR PLANO ---
-@app.put("/api/admin/plans/{plan_id}")
-def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_db)):
+def atualizar_plano(
+    plan_id: int, 
+    dados: PlanoUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     plano = db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
     if not plano:
         raise HTTPException(status_code=404, detail="Plano não encontrado")
     
+    # 🔒 VERIFICA SE O BOT DO PLANO PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(plano.bot_id, current_user.id, db)
+    
     # Atualiza apenas se o campo foi enviado e não é None
     if dados.nome_exibicao is not None:
         plano.nome_exibicao = dados.nome_exibicao
-    
     if dados.preco is not None:
         plano.preco_atual = dados.preco
-        plano.preco_cheio = dados.preco * 2 
-        
+        plano.preco_cheio = dados.preco * 2
     if dados.dias_duracao is not None:
         plano.dias_duracao = dados.dias_duracao
         plano.key_id = f"plan_{plano.bot_id}_{dados.dias_duracao}d"
         plano.descricao = f"Acesso de {dados.dias_duracao} dias"
-
+    
     db.commit()
     db.refresh(plano)
+    
+    logger.info(f"✏️ Plano atualizado (rota legada): {plano.nome_exibicao} (Owner: {current_user.username})")
+    
     return {"status": "success", "msg": "Plano atualizado"}
 
 # =========================================================
 # 💬 FLUXO DO BOT (V2)
 # =========================================================
 @app.get("/api/admin/bots/{bot_id}/flow")
-def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
+def obter_fluxo(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE IGUAL
     fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
     if not fluxo:
         # Retorna padrão se não existir
         return {
@@ -1831,6 +1963,7 @@ def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
             "miniapp_url": "",
             "miniapp_btn_text": "ABRIR LOJA"
         }
+    
     return fluxo
 
 class FlowUpdate(BaseModel):
@@ -1847,7 +1980,16 @@ class FlowUpdate(BaseModel):
     miniapp_btn_text: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/flow")
-def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
+def salvar_fluxo(
+    bot_id: int, 
+    flow: FlowUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE EXATAMENTE IGUAL
     fluxo_db = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     
     if not fluxo_db:
@@ -1870,7 +2012,9 @@ def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     if flow.miniapp_btn_text: fluxo_db.miniapp_btn_text = flow.miniapp_btn_text
     
     db.commit()
-    logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso.")
+    
+    logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso (Owner: {current_user.username})")
+    
     return {"status": "saved"}
 
 # =========================================================
@@ -2023,120 +2167,6 @@ def remover_passo_flow(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 
-@app.post("/api/admin/tracking/folders")
-def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
-    try:
-        nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
-        db.add(nova_pasta)
-        db.commit()
-        db.refresh(nova_pasta)
-        return {"status": "ok", "id": nova_pasta.id}
-    except Exception as e:
-        logger.error(f"Erro ao criar pasta: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
-
-@app.get("/api/admin/tracking/links/{folder_id}")
-def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
-    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
-
-@app.post("/api/admin/tracking/links")
-def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
-    # Gera código aleatório se não informado
-    if not dados.codigo:
-        import random, string
-        chars = string.ascii_lowercase + string.digits
-        dados.codigo = ''.join(random.choice(chars) for _ in range(8))
-    
-    # Verifica duplicidade
-    exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
-    if exists:
-        raise HTTPException(400, "Este código de rastreamento já existe.")
-        
-    novo_link = TrackingLink(
-        folder_id=dados.folder_id,
-        bot_id=dados.bot_id,
-        nome=dados.nome,
-        codigo=dados.codigo,
-        origem=dados.origem
-    )
-    db.add(novo_link)
-    db.commit()
-    return {"status": "ok", "link": novo_link}
-
-@app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(fid: int, db: Session = Depends(get_db)):
-    # Apaga links dentro da pasta primeiro
-    db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
-    db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
-    db.commit()
-    return {"status": "deleted"}
-
-@app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(lid: int, db: Session = Depends(get_db)):
-    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
-    db.commit()
-    return {"status": "deleted"}
-
-# =========================================================
-# 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
-# =========================================================
-@app.get("/api/admin/bots/{bot_id}/flow/steps")
-def listar_passos_flow(bot_id: int, db: Session = Depends(get_db)):
-    return db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
-
-@app.post("/api/admin/bots/{bot_id}/flow/steps")
-def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot: raise HTTPException(404, "Bot não encontrado")
-    
-    # Cria o novo passo
-    novo_passo = BotFlowStep(
-        bot_id=bot_id, step_order=payload.step_order,
-        msg_texto=payload.msg_texto, msg_media=payload.msg_media,
-        btn_texto=payload.btn_texto
-    )
-    db.add(novo_passo)
-    db.commit()
-    return {"status": "success"}
-
-@app.put("/api/admin/bots/{bot_id}/flow/steps/{step_id}")
-def atualizar_passo_flow(bot_id: int, step_id: int, dados: FlowStepUpdate, db: Session = Depends(get_db)):
-    """Atualiza um passo intermediário existente"""
-    passo = db.query(BotFlowStep).filter(
-        BotFlowStep.id == step_id,
-        BotFlowStep.bot_id == bot_id
-    ).first()
-    
-    if not passo:
-        raise HTTPException(status_code=404, detail="Passo não encontrado")
-    
-    # Atualiza apenas os campos enviados
-    if dados.msg_texto is not None:
-        passo.msg_texto = dados.msg_texto
-    if dados.msg_media is not None:
-        passo.msg_media = dados.msg_media
-    if dados.btn_texto is not None:
-        passo.btn_texto = dados.btn_texto
-    if dados.autodestruir is not None:
-        passo.autodestruir = dados.autodestruir
-    if dados.mostrar_botao is not None:
-        passo.mostrar_botao = dados.mostrar_botao
-    if dados.delay_seconds is not None:
-        passo.delay_seconds = dados.delay_seconds
-    
-    db.commit()
-    db.refresh(passo)
-    return {"status": "success", "passo": passo}
-
-
-@app.delete("/api/admin/bots/{bot_id}/flow/steps/{sid}")
-def remover_passo_flow(bot_id: int, sid: int, db: Session = Depends(get_db)):
-    passo = db.query(BotFlowStep).filter(BotFlowStep.id == sid, BotFlowStep.bot_id == bot_id).first()
-    if passo:
-        db.delete(passo)
-        db.commit()
-    return {"status": "deleted"}
-
 # =========================================================
 # 📱 ROTAS DE MINI APP (LOJA VIRTUAL) & GESTÃO DE MODO
 # =========================================================
@@ -2169,7 +2199,15 @@ def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get
 
 # 2. Salvar Configuração Global
 @app.post("/api/admin/bots/{bot_id}/miniapp/config")
-def save_miniapp_config(bot_id: int, dados: MiniAppConfigUpdate, db: Session = Depends(get_db)):
+def save_miniapp_config(
+    bot_id: int, 
+    dados: MiniAppConfigUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+
     config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
     
     if not config:
@@ -3914,11 +3952,13 @@ def dashboard_stats(
     bot_id: Optional[int] = None, 
     start_date: Optional[str] = None, 
     end_date: Optional[str] = None, 
-    db: Session = Depends(get_db)
-): 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     """
     Dashboard V2: Suporta filtro por período.
     🔥 CORREÇÃO: Inclui 'expired' no cálculo financeiro.
+    🔒 PROTEGIDO: Apenas dados dos bots do usuário
     """
     try:
         # 1. DEFINIÇÃO DO PERÍODO
@@ -3933,12 +3973,19 @@ def dashboard_stats(
 
         hoje_inicio = datetime(agora.year, agora.month, agora.day)
 
-        query_leads = db.query(Lead)
-        query_pedidos = db.query(Pedido)
-
+        # 🔒 FILTRA APENAS BOTS DO USUÁRIO
         if bot_id:
-            query_leads = query_leads.filter(Lead.bot_id == bot_id)
-            query_pedidos = query_pedidos.filter(Pedido.bot_id == bot_id)
+            # Se bot_id fornecido, verifica se pertence ao usuário
+            verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+            bots_ids = [bot_id]
+        else:
+            # Pega todos os bots do usuário
+            bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
+            bots_ids = [b.id for b in bots]
+
+        # QUERIES FILTRADAS PELOS BOTS DO USUÁRIO
+        query_leads = db.query(Lead).filter(Lead.bot_id.in_(bots_ids))
+        query_pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(bots_ids))
 
         # Leads no período
         leads_periodo = query_leads.filter(
@@ -3962,21 +4009,22 @@ def dashboard_stats(
         
         # Total Faturamento
         total_revenue = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS
+            Pedido.bot_id.in_(bots_ids),  # 🔒 FILTRO
+            Pedido.status.in_(status_pagos),
             Pedido.created_at >= dt_inicio,
             Pedido.created_at <= dt_fim
         )
-        if bot_id: total_revenue = total_revenue.filter(Pedido.bot_id == bot_id)
         valor_total_revenue = total_revenue.scalar() or 0.0
 
         # Assinantes (Transações no período)
         total_transactions = vendas_periodo.count()
         
         # Assinantes Ativos Totais (Base geral - AQUI NÃO CONTA EXPIRADO, POIS É "ATIVO")
-        # Para "Ativos", mantemos a lógica antiga (sem expired)
         status_ativos_reais = ['paid', 'active', 'approved', 'completed', 'succeeded']
-        total_active_users = db.query(Pedido).filter(Pedido.status.in_(status_ativos_reais))
-        if bot_id: total_active_users = total_active_users.filter(Pedido.bot_id == bot_id)
+        total_active_users = db.query(Pedido).filter(
+            Pedido.bot_id.in_(bots_ids),  # 🔒 FILTRO
+            Pedido.status.in_(status_ativos_reais)
+        )
         count_active_users = total_active_users.count()
 
         # Ticket Médio
@@ -3984,10 +4032,10 @@ def dashboard_stats(
 
         # Vendas Hoje
         sales_today_query = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS (Se expirou hoje, conta)
+            Pedido.bot_id.in_(bots_ids),  # 🔒 FILTRO
+            Pedido.status.in_(status_pagos),
             Pedido.created_at >= hoje_inicio
         )
-        if bot_id: sales_today_query = sales_today_query.filter(Pedido.bot_id == bot_id)
         valor_sales_today = sales_today_query.scalar() or 0.0
 
         # Taxa de Conversão
@@ -4004,11 +4052,11 @@ def dashboard_stats(
             data_loop_fim = data_loop + timedelta(days=1)
             
             soma_dia = db.query(func.sum(Pedido.valor)).filter(
-                Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS
+                Pedido.bot_id.in_(bots_ids),  # 🔒 FILTRO
+                Pedido.status.in_(status_pagos),
                 Pedido.created_at >= data_loop,
                 Pedido.created_at < data_loop_fim
             )
-            if bot_id: soma_dia = soma_dia.filter(Pedido.bot_id == bot_id)
             
             val = soma_dia.scalar() or 0.0
             
