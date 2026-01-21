@@ -5310,11 +5310,12 @@ def update_user_status(
 # 👇 COLE ISSO NA SEÇÃO DE ROTAS DO SUPER ADMIN
 
 # 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
+# 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
 @app.put("/api/superadmin/users/{user_id}")
 def update_user_financials(
     user_id: int, 
     user_data: PlatformUserUpdate, 
-    current_user = Depends(get_current_active_superuser),
+    current_user = Depends(get_current_superuser), # <--- CORRIGIDO AQUI
     db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.id == user_id).first()
