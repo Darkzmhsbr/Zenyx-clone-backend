@@ -4324,92 +4324,108 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
 # =========================================================
 # 🏆 ROTA DE PERFIL & CONQUISTAS (PERFIL GLOBAL)
 # =========================================================
+# =========================================================
+# 👤 PERFIL E ESTATÍSTICAS (BLINDADO FASE 2)
+# =========================================================
 @app.get("/api/admin/profile")
-def get_profile_stats(db: Session = Depends(get_db)):
+def get_user_profile(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH OBRIGATÓRIA
+):
     """
-    Retorna dados do perfil + Estatísticas GLOBAIS.
-    🔥 CORREÇÃO: Faturamento inclui usuários expirados.
+    Retorna dados do perfil, mas calcula estatísticas APENAS
+    dos bots que pertencem ao usuário logado.
     """
     try:
-        # 1. Busca Configurações
-        conf_name = db.query(SystemConfig).filter(SystemConfig.key == "admin_name").first()
-        conf_avatar = db.query(SystemConfig).filter(SystemConfig.key == "admin_avatar").first()
+        # 1. Identificar quais bots pertencem a este usuário
+        user_bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
+        bot_ids = [b.id for b in user_bots]
         
-        admin_name = conf_name.value if conf_name else "Administrador"
-        admin_avatar = conf_avatar.value if conf_avatar else ""
+        # Estatísticas Básicas (Filtradas pelo Dono)
+        total_bots = len(user_bots)
+        
+        # Se o usuário não tem bots, retornamos zerado para evitar erro de SQL (IN empty)
+        if total_bots == 0:
+            return {
+                "name": current_user.full_name or current_user.username,
+                "avatar_url": None,
+                "stats": {
+                    "total_bots": 0,
+                    "total_members": 0,
+                    "total_revenue": 0.0,
+                    "total_sales": 0
+                },
+                "gamification": {
+                    "current_level": {"name": "Iniciante", "target": 100},
+                    "next_level": {"name": "Empreendedor", "target": 1000},
+                    "progress_percentage": 0
+                }
+            }
 
-        # 2. Estatísticas GLOBAIS
-        total_bots = db.query(Bot).count()
-        
-        q_leads = db.query(Lead.user_id).all()
-        q_pedidos = db.query(Pedido.telegram_id).all()
-        
-        unique_members = set()
-        for r in q_leads:
-            if r[0]: unique_members.add(str(r[0]))
-        for r in q_pedidos:
-            if r[0]: unique_members.add(str(r[0]))
-            
-        total_members = len(unique_members)
-        
-        # ============================================================
-        # 💰 [CORRIGIDO] Status para Contar DINHEIRO (INCLUI EXPIRADO)
-        # ============================================================
-        status_financeiro = ['paid', 'approved', 'active', 'completed', 'succeeded', 'expired']
-        
-        revenue_query = db.query(func.sum(Pedido.valor)).filter(Pedido.status.in_(status_financeiro))
-        total_revenue = revenue_query.scalar() or 0.0
-        
-        total_sales = db.query(Pedido).filter(Pedido.status.in_(status_financeiro)).count()
-        
-        # 3. Lógica de Gamificação
+        # 2. Calcular Membros (Leads) apenas dos bots do usuário
+        total_members = db.query(Lead).filter(Lead.bot_id.in_(bot_ids)).count()
+
+        # 3. Calcular Vendas e Receita apenas dos bots do usuário
+        total_sales = db.query(Pedido).filter(
+            Pedido.bot_id.in_(bot_ids), 
+            Pedido.status == 'approved'
+        ).count()
+
+        total_revenue = db.query(func.sum(Pedido.valor)).filter(
+            Pedido.bot_id.in_(bot_ids), 
+            Pedido.status == 'approved'
+        ).scalar() or 0.0
+
+        # 4. Lógica de Gamificação (Níveis baseados no Faturamento do Usuário)
         levels = [
-            {"name": "Prodígio", "target": 100000, "slug": "prodigio"},
-            {"name": "Empreendedor", "target": 500000, "slug": "empreendedor"},
-            {"name": "Milionário", "target": 1000000, "slug": "milionario"},
-            {"name": "Magnata", "target": 10000000, "slug": "magnata"}
+            {"name": "Iniciante", "target": 100},
+            {"name": "Empreendedor", "target": 1000},
+            {"name": "Barão", "target": 5000},
+            {"name": "Magnata", "target": 10000},
+            {"name": "Imperador", "target": 50000}
         ]
         
-        current_level = None
-        next_level = levels[0]
+        current_level = levels[0]
+        next_level = levels[1]
         
-        for lvl in levels:
-            if total_revenue >= lvl["target"]:
-                current_level = lvl
-            else:
-                next_level = lvl
-                break
+        for i, level in enumerate(levels):
+            if total_revenue >= level["target"]:
+                current_level = level
+                next_level = levels[i+1] if i+1 < len(levels) else None
         
-        if total_revenue >= levels[-1]["target"]:
-            next_level = None 
-            
+        # Cálculo da porcentagem
+        progress = 0
         if next_level:
-            progress_pct = (total_revenue / next_level["target"]) * 100
-            progress_pct = min(progress_pct, 100)
+            # Quanto falta para o próximo nível
+            diff_target = next_level["target"] - current_level["target"]
+            diff_current = total_revenue - current_level["target"]
+            # Evita divisão por zero
+            if diff_target > 0:
+                progress = (diff_current / diff_target) * 100
+                if progress > 100: progress = 100
+                if progress < 0: progress = 0
         else:
-            progress_pct = 100
-            
+            progress = 100 # Nível máximo atingido
+
         return {
-            "profile": {
-                "name": admin_name,
-                "avatar_url": admin_avatar
-            },
+            "name": current_user.full_name or current_user.username,
+            "avatar_url": None, # Futuro: Adicionar campo no banco
             "stats": {
                 "total_bots": total_bots,
                 "total_members": total_members,
-                "total_revenue": total_revenue,
+                "total_revenue": float(total_revenue),
                 "total_sales": total_sales
             },
             "gamification": {
                 "current_level": current_level,
                 "next_level": next_level,
-                "progress_percentage": round(progress_pct, 2)
+                "progress_percentage": round(progress, 1)
             }
         }
 
     except Exception as e:
-        logger.error(f"Erro ao buscar perfil: {e}")
-        return {"error": str(e)}
+        logger.error(f"Erro ao carregar perfil: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao carregar perfil")
 
 @app.post("/api/admin/profile")
 def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
