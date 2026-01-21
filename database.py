@@ -50,6 +50,9 @@ class User(Base):
     
     # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
+    
+    # 🆕 FASE 3.3: Relacionamento com logs de auditoria
+    audit_logs = relationship("AuditLog", back_populates="user")
 
 # =========================================================
 # ⚙️ CONFIGURAÇÕES GERAIS
@@ -195,23 +198,20 @@ class BotFlow(Base):
     
     # --- CONFIGURAÇÃO DE MODO DE INÍCIO (NOVO) ---
     start_mode = Column(String, default="padrao") # 'padrao', 'miniapp'
-    miniapp_url = Column(String, nullable=True)
-    miniapp_btn_text = Column(String, default="ABRIR LOJA 🛍️")
-    # ---------------------------------------------
-
-    # Passo 1 (Fixo - Modo Padrão)
-    msg_boas_vindas = Column(Text, default="Olá! Bem-vindo.")
+    miniapp_url = Column(String, nullable=True)   # URL da loja externa
+    miniapp_btn_text = Column(String, default="🛒 ABRIR LOJA")
+    
+    # --- MENSAGEM 1 (BOAS-VINDAS) ---
+    msg_boas_vindas = Column(Text, default="Olá! Bem-vindo(a)!")
     media_url = Column(String, nullable=True)
-    btn_text_1 = Column(String, default="🔓 DESBLOQUEAR")
+    btn_text_1 = Column(String, default="📋 Ver Planos")
     autodestruir_1 = Column(Boolean, default=False)
+    mostrar_planos_1 = Column(Boolean, default=True)
     
-    # Mostrar Planos na Msg 1
-    mostrar_planos_1 = Column(Boolean, default=False)
-    
-    # Passo Final (Fixo)
+    # --- MENSAGEM 2 (SEGUNDO PASSO) ---
     msg_2_texto = Column(Text, nullable=True)
     msg_2_media = Column(String, nullable=True)
-    mostrar_planos_2 = Column(Boolean, default=True)
+    mostrar_planos_2 = Column(Boolean, default=False)
 
 # =========================================================
 # 🧩 TABELA DE PASSOS INTERMEDIÁRIOS
@@ -411,3 +411,38 @@ class MiniAppCategory(Base):
     content_json = Column(Text)
     
     bot = relationship("Bot", back_populates="miniapp_categories")
+
+# =========================================================
+# 📋 AUDIT LOGS (🆕 FASE 3.3 - AUDITORIA)
+# =========================================================
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # 👤 Quem fez a ação
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    username = Column(String, nullable=False)  # Denormalizado para performance
+    
+    # 🎯 O que foi feito
+    action = Column(String(50), nullable=False, index=True)  # Ex: "bot_created", "login_success"
+    resource_type = Column(String(50), nullable=False, index=True)  # Ex: "bot", "plano", "auth"
+    resource_id = Column(Integer, nullable=True)  # ID do recurso afetado
+    
+    # 📝 Detalhes
+    description = Column(Text, nullable=True)  # Descrição legível para humanos
+    details = Column(Text, nullable=True)  # JSON com dados extras
+    
+    # 🌐 Contexto
+    ip_address = Column(String(50), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    
+    # ✅ Status
+    success = Column(Boolean, default=True, index=True)
+    error_message = Column(Text, nullable=True)
+    
+    # 🕒 Timestamp
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # Relacionamento
+    user = relationship("User", back_populates="audit_logs")

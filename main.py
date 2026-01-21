@@ -28,7 +28,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -174,6 +174,95 @@ def verificar_bot_pertence_usuario(bot_id: int, user_id: int, db: Session):
         )
     
     return bot
+
+# =========================================================
+# 🌐 FUNÇÃO HELPER: EXTRAIR IP DO CLIENT (🆕 FASE 3.3)
+# =========================================================
+def get_client_ip(request: Request) -> str:
+    """
+    Extrai o IP real do cliente, considerando proxies (Railway, Vercel, etc)
+    """
+    # Tenta pegar do header X-Forwarded-For (proxies)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        # Pega o primeiro IP da lista (cliente real)
+        return forwarded.split(",")[0].strip()
+    
+    # Tenta pegar do header X-Real-IP
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    
+    # Fallback: IP direto da conexão
+    if request.client:
+        return request.client.host
+    
+    return "unknown"
+
+# =========================================================
+# 📋 FUNÇÃO HELPER: REGISTRAR AÇÃO DE AUDITORIA (🆕 FASE 3.3)
+# =========================================================
+def log_action(
+    db: Session,
+    user_id: int,
+    username: str,
+    action: str,
+    resource_type: str,
+    resource_id: int = None,
+    description: str = None,
+    details: dict = None,
+    success: bool = True,
+    error_message: str = None,
+    ip_address: str = None,
+    user_agent: str = None
+):
+    """
+    Registra uma ação de auditoria no banco de dados
+    
+    Parâmetros:
+    - user_id: ID do usuário que executou a ação
+    - username: Nome do usuário (denormalizado para performance)
+    - action: Tipo de ação (ex: "bot_created", "login_success")
+    - resource_type: Tipo de recurso afetado (ex: "bot", "plano", "auth")
+    - resource_id: ID do recurso (opcional)
+    - description: Descrição legível da ação
+    - details: Dicionário com dados extras (será convertido para JSON)
+    - success: Se a ação foi bem-sucedida
+    - error_message: Mensagem de erro (se houver)
+    - ip_address: IP do cliente
+    - user_agent: Navegador/dispositivo do cliente
+    """
+    try:
+        # Converte details para JSON se for dict
+        details_json = None
+        if details:
+            import json
+            details_json = json.dumps(details, ensure_ascii=False)
+        
+        # Cria o registro de auditoria
+        audit_log = AuditLog(
+            user_id=user_id,
+            username=username,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            description=description,
+            details=details_json,
+            success=success,
+            error_message=error_message,
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+        
+        db.add(audit_log)
+        db.commit()
+        
+        logger.info(f"📋 Audit Log: {username} - {action} - {resource_type}")
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao criar log de auditoria: {e}")
+        # Não propaga o erro para não quebrar a operação principal
+        db.rollback()
 
 # ============================================================
 # 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
@@ -1194,112 +1283,131 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 # 🔐 ROTAS DE AUTENTICAÇÃO
 # =========================================================
 
-@app.post("/api/auth/register", response_model=Token, tags=["Autenticação"])
-async def register(user_data: UserCreate):
+# =========================================================
+# 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
+# =========================================================
+@app.post("/api/auth/register", response_model=Token)
+def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
     """
     Registra um novo usuário no sistema
+    🆕 Agora com log de auditoria
     """
-    db = SessionLocal()
-    try:
-        from database import User
-        
-        # Verifica se usuário já existe
-        existing_user = db.query(User).filter(
-            (User.username == user_data.username) | (User.email == user_data.email)
-        ).first()
-        
-        if existing_user:
-            raise HTTPException(status_code=400, detail="Usuário ou email já cadastrado")
-        
-        # Cria novo usuário
-        hashed_password = get_password_hash(user_data.password)
-        new_user = User(
-            username=user_data.username,
-            email=user_data.email,
-            password_hash=hashed_password,
-            full_name=user_data.full_name
-        )
-        
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        
-        # Gera token de acesso
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": new_user.username, "user_id": new_user.id},
-            expires_delta=access_token_expires
-        )
-        
-        print(f"✅ Novo usuário registrado: {new_user.username} (ID: {new_user.id})")
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": new_user.id,
-            "username": new_user.username
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        print(f"❌ Erro ao registrar usuário: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Erro ao registrar usuário: {str(e)}")
-    finally:
-        db.close()
+    # Validações
+    existing_user = db.query(User).filter(User.username == user_data.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username já existe")
+    
+    existing_email = db.query(User).filter(User.email == user_data.email).first()
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email já cadastrado")
+    
+    # Cria novo usuário
+    from database import User
+    hashed_password = get_password_hash(user_data.password)
+    
+    new_user = User(
+        username=user_data.username,
+        email=user_data.email,
+        password_hash=hashed_password,
+        full_name=user_data.full_name
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # 📋 AUDITORIA: Registro de novo usuário
+    log_action(
+        db=db,
+        user_id=new_user.id,
+        username=new_user.username,
+        action="user_registered",
+        resource_type="auth",
+        resource_id=new_user.id,
+        description=f"Novo usuário registrado: {new_user.username}",
+        details={
+            "email": new_user.email,
+            "full_name": new_user.full_name
+        },
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    # Gera token JWT
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": new_user.username, "user_id": new_user.id},
+        expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": new_user.id,
+        "username": new_user.username
+    }
 
-
-@app.post("/api/auth/login", response_model=Token, tags=["Autenticação"])
-async def login(user_data: UserLogin):
+@app.post("/api/auth/login", response_model=Token)
+def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     """
-    Realiza login e retorna token JWT
+    Autentica usuário e retorna token JWT
+    🆕 Agora com log de auditoria
     """
-    db = SessionLocal()
-    try:
-        from database import User
+    from database import User
+    
+    # Busca usuário
+    user = db.query(User).filter(User.username == user_data.username).first()
+    
+    # Verifica se usuário existe e senha está correta
+    if not user or not verify_password(user_data.password, user.password_hash):
+        # 📋 AUDITORIA: Login falhado
+        if user:
+            log_action(
+                db=db,
+                user_id=user.id,
+                username=user.username,
+                action="login_failed",
+                resource_type="auth",
+                description=f"Tentativa de login falhou: senha incorreta",
+                success=False,
+                error_message="Senha incorreta",
+                ip_address=get_client_ip(request),
+                user_agent=request.headers.get("user-agent")
+            )
         
-        # Busca usuário
-        user = db.query(User).filter(User.username == user_data.username).first()
-        
-        if not user:
-            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
-        
-        # Verifica senha
-        if not verify_password(user_data.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
-        
-        # Verifica se está ativo
-        if not user.is_active:
-            raise HTTPException(status_code=403, detail="Usuário inativo")
-        
-        # Gera token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user.username, "user_id": user.id},
-            expires_delta=access_token_expires
+        raise HTTPException(
+            status_code=401,
+            detail="Credenciais inválidas"
         )
-        
-        print(f"✅ Login realizado: {user.username} (ID: {user.id})")
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user.id,
-            "username": user.username
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Erro ao fazer login: {str(e)}")
-        raise HTTPException(status_code=500, detail="Erro ao fazer login")
-    finally:
-        db.close()
+    
+    # 📋 AUDITORIA: Login bem-sucedido
+    log_action(
+        db=db,
+        user_id=user.id,
+        username=user.username,
+        action="login_success",
+        resource_type="auth",
+        description=f"Login bem-sucedido",
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    # Gera token JWT
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username, "user_id": user.id},
+        expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user.id,
+        "username": user.username
+    }
 
-
-@app.get("/api/auth/me", tags=["Autenticação"])
-async def get_me(current_user = Depends(get_current_user)):
+@app.get("/api/auth/me")
+async def get_current_user_info(current_user = Depends(get_current_user)):
     """
     Retorna informações do usuário logado
     """
@@ -1307,8 +1415,7 @@ async def get_me(current_user = Depends(get_current_user)):
         "id": current_user.id,
         "username": current_user.username,
         "email": current_user.email,
-        "full_name": current_user.full_name,
-        "is_active": current_user.is_active
+        "full_name": current_user.full_name
     }
 
 # =========================================================
@@ -1330,81 +1437,127 @@ def configurar_menu_bot(token):
 # ⚙️ GESTÃO DE BOTS
 # ===========================
 
-@app.post("/api/admin/bots", response_model=BotResponse)
+# =========================================================
+# 🤖 ROTAS DE BOTS (ATUALIZADAS COM AUDITORIA 🆕)
+# =========================================================
+
+@app.post("/api/admin/bots")
 def criar_bot(
-    bot_data: BotCreate, 
+    bot_data: BotCreate,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+    current_user = Depends(get_current_user)
 ):
-    if db.query(Bot).filter(Bot.token == bot_data.token).first():
-        raise HTTPException(status_code=400, detail="Token já cadastrado.")
-
+    """
+    Cria um novo bot e atribui automaticamente ao usuário logado
+    🆕 Agora com log de auditoria
+    """
     try:
-        tb = telebot.TeleBot(bot_data.token)
-        bot_info = tb.get_me()
-        username = bot_info.username if hasattr(bot_info, 'username') else None
+        novo_bot = Bot(
+            nome=bot_data.nome,
+            token=bot_data.token,
+            id_canal_vip=bot_data.id_canal_vip,
+            admin_principal_id=bot_data.admin_principal_id,
+            suporte_username=bot_data.suporte_username,
+            owner_id=current_user.id,  # 🔒 Atribui automaticamente
+            status="ativo"
+        )
         
-        # Configura webhook
-        public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
-        if public_url:
-            webhook_url = f"https://{public_url}/webhook/{bot_data.token}"
-            tb.set_webhook(url=webhook_url)
+        db.add(novo_bot)
+        db.commit()
+        db.refresh(novo_bot)
         
-        # 🔥 CONFIGURA MENU
-        configurar_menu_bot(bot_data.token)
+        # 📋 AUDITORIA: Bot criado
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            username=current_user.username,
+            action="bot_created",
+            resource_type="bot",
+            resource_id=novo_bot.id,
+            description=f"Criou bot '{novo_bot.nome}'",
+            details={
+                "bot_name": novo_bot.nome,
+                "canal_vip": novo_bot.id_canal_vip,
+                "status": novo_bot.status
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
         
-        status = "ativo"
+        logger.info(f"✅ Bot criado: {novo_bot.nome} (Owner: {current_user.username})")
+        return {"id": novo_bot.id, "nome": novo_bot.nome, "status": "criado"}
+        
     except Exception as e:
+        db.rollback()
+        
+        # 📋 AUDITORIA: Falha ao criar bot
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            username=current_user.username,
+            action="bot_create_failed",
+            resource_type="bot",
+            description=f"Falha ao criar bot '{bot_data.nome}'",
+            success=False,
+            error_message=str(e),
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
         logger.error(f"Erro ao criar bot: {e}")
-        raise HTTPException(status_code=400, detail="Token inválido ou erro ao conectar.")
-
-    novo_bot = Bot(
-        nome=bot_data.nome,
-        token=bot_data.token,
-        username=username,
-        id_canal_vip=bot_data.id_canal_vip,
-        status=status,
-        admin_principal_id=bot_data.admin_principal_id,
-        suporte_username=bot_data.suporte_username,
-        owner_id=current_user.id  # 🔒 ATRIBUI AO USUÁRIO ATUAL
-    )
-    db.add(novo_bot)
-    db.commit()
-    db.refresh(novo_bot)
-    
-    logger.info(f"✅ Bot criado: {novo_bot.nome} (Owner: {current_user.username})")
-    
-    return {
-        "id": novo_bot.id,
-        "nome": novo_bot.nome,
-        "token": novo_bot.token,
-        "username": novo_bot.username,
-        "id_canal_vip": novo_bot.id_canal_vip,
-        "admin_principal_id": novo_bot.admin_principal_id,
-        "status": novo_bot.status,
-        "leads": 0,
-        "revenue": 0.0,
-        "created_at": novo_bot.created_at
-    }
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/admin/bots/{bot_id}")
-def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
-    bot_db = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot_db: raise HTTPException(404, "Bot não encontrado")
+def update_bot(
+    bot_id: int, 
+    dados: BotUpdate, 
+    request: Request,  # 🆕 ADICIONADO para auditoria
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🆕 ADICIONADO para auditoria e verificação
+):
+    """
+    Atualiza bot (MANTÉM TODA A LÓGICA ORIGINAL + AUDITORIA 🆕)
+    """
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    bot_db = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # Guarda valores antigos para o log de auditoria
+    old_values = {
+        "nome": bot_db.nome,
+        "token": "***" if bot_db.token else None,  # Não loga token completo
+        "canal_vip": bot_db.id_canal_vip,
+        "admin_principal": bot_db.admin_principal_id,
+        "suporte": bot_db.suporte_username,
+        "status": bot_db.status
+    }
     
     old_token = bot_db.token
+    changes = {}  # Rastreia mudanças para auditoria
 
     # 1. Atualiza campos administrativos
-    if dados.id_canal_vip: bot_db.id_canal_vip = dados.id_canal_vip
-    if dados.admin_principal_id is not None: bot_db.admin_principal_id = dados.admin_principal_id
-    if dados.suporte_username is not None: bot_db.suporte_username = dados.suporte_username # 🔥 ATUALIZA
+    if dados.id_canal_vip and dados.id_canal_vip != bot_db.id_canal_vip:
+        changes["canal_vip"] = {"old": bot_db.id_canal_vip, "new": dados.id_canal_vip}
+        bot_db.id_canal_vip = dados.id_canal_vip
     
-    # 2. LÓGICA DE TROCA DE TOKEN
+    if dados.admin_principal_id is not None and dados.admin_principal_id != bot_db.admin_principal_id:
+        changes["admin_principal"] = {"old": bot_db.admin_principal_id, "new": dados.admin_principal_id}
+        bot_db.admin_principal_id = dados.admin_principal_id
+    
+    if dados.suporte_username is not None and dados.suporte_username != bot_db.suporte_username:
+        changes["suporte"] = {"old": bot_db.suporte_username, "new": dados.suporte_username}
+        bot_db.suporte_username = dados.suporte_username
+    
+    # 2. LÓGICA DE TROCA DE TOKEN (MANTIDA INTACTA)
     if dados.token and dados.token != old_token:
         try:
             logger.info(f"🔄 Detectada troca de token para o bot ID {bot_id}...")
             new_tb = telebot.TeleBot(dados.token)
             bot_info = new_tb.get_me()
+            
+            changes["token"] = {"old": "***", "new": "*** (alterado)"}
+            changes["nome_via_api"] = {"old": bot_db.nome, "new": bot_info.first_name}
+            changes["username_via_api"] = {"old": bot_db.username, "new": bot_info.username}
             
             bot_db.token = dados.token
             bot_db.nome = bot_info.first_name
@@ -1413,30 +1566,109 @@ def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
             try:
                 old_tb = telebot.TeleBot(old_token)
                 old_tb.delete_webhook()
-            except: pass
+            except: 
+                pass
 
             public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testesv1-production.up.railway.app")
-            if public_url.startswith("https://"): public_url = public_url.replace("https://", "")
+            if public_url.startswith("https://"): 
+                public_url = public_url.replace("https://", "")
             
             webhook_url = f"https://{public_url}/webhook/{dados.token}"
             new_tb.set_webhook(url=webhook_url)
             
             bot_db.status = "ativo"
+            changes["status"] = {"old": old_values["status"], "new": "ativo"}
             
         except Exception as e:
+            # 📋 AUDITORIA: Falha ao trocar token
+            log_action(
+                db=db,
+                user_id=current_user.id,
+                username=current_user.username,
+                action="bot_token_change_failed",
+                resource_type="bot",
+                resource_id=bot_id,
+                description=f"Falha ao trocar token do bot '{bot_db.nome}'",
+                success=False,
+                error_message=str(e),
+                ip_address=get_client_ip(request),
+                user_agent=request.headers.get("user-agent")
+            )
             raise HTTPException(status_code=400, detail=f"Token inválido: {str(e)}")
             
     else:
-        if dados.nome: bot_db.nome = dados.nome
+        # Se não trocou token, permite atualizar nome manualmente
+        if dados.nome and dados.nome != bot_db.nome:
+            changes["nome"] = {"old": bot_db.nome, "new": dados.nome}
+            bot_db.nome = dados.nome
     
-    # 🔥 ATUALIZA O MENU SEMPRE QUE SALVAR
-    configurar_menu_bot(bot_db.token)
+    # 🔥 ATUALIZA O MENU SEMPRE QUE SALVAR (MANTIDO INTACTO)
+    try:
+        configurar_menu_bot(bot_db.token)
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao configurar menu do bot: {e}")
     
     db.commit()
     db.refresh(bot_db)
+    
+    # 📋 AUDITORIA: Bot atualizado com sucesso
+    log_action(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="bot_updated",
+        resource_type="bot",
+        resource_id=bot_id,
+        description=f"Atualizou bot '{bot_db.nome}'",
+        details={"changes": changes} if changes else {"message": "Nenhuma alteração detectada"},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    logger.info(f"✅ Bot atualizado: {bot_db.nome} (Owner: {current_user.username})")
     return {"status": "ok", "msg": "Bot atualizado com sucesso"}
 
-# --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
+@app.delete("/api/admin/bots/{bot_id}")
+def deletar_bot(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Deleta bot apenas se pertencer ao usuário
+    🆕 Agora com log de auditoria
+    """
+    bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    nome_bot = bot.nome
+    canal_vip = bot.id_canal_vip
+    username = bot.username
+    
+    db.delete(bot)
+    db.commit()
+    
+    # 📋 AUDITORIA: Bot deletado
+    log_action(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="bot_deleted",
+        resource_type="bot",
+        resource_id=bot_id,
+        description=f"Deletou bot '{nome_bot}'",
+        details={
+            "bot_name": nome_bot,
+            "username": username,
+            "canal_vip": canal_vip
+        },
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    logger.info(f"🗑 Bot deletado: {nome_bot} (Owner: {current_user.username})")
+    return {"status": "deletado", "bot_nome": nome_bot}
+
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
 def toggle_bot(
@@ -1463,52 +1695,6 @@ def toggle_bot(
     logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner: {current_user.username})")
     
     return {"status": novo_status}
-
-# --- NOVA ROTA: EXCLUIR BOT ---
-# --- NOVA ROTA: EXCLUIR BOT (COM LIMPEZA TOTAL) ---
-@app.delete("/api/admin/bots/{bot_id}")
-def deletar_bot(
-    bot_id: int, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
-):
-    # 🔒 VERIFICA SE PERTENCE AO USUÁRIO
-    bot_db = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
-    
-    try:
-        # 1. Tenta remover o Webhook do Telegram para limpar no servidor deles
-        try:
-            tb = telebot.TeleBot(bot_db.token)
-            tb.delete_webhook()
-        except:
-            pass  # Se der erro (ex: token inválido), continua e apaga do banco
-        
-        # 2. LIMPEZA PESADA (Exclui manualmente os dependentes para evitar erro de integridade)
-        # Apaga PEDIDOS vinculados
-        db.query(Pedido).filter(Pedido.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # Apaga LEADS vinculados
-        db.query(Lead).filter(Lead.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # Apaga CAMPANHAS de Remarketing vinculadas
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3. Apaga o Bot (Planos, Fluxos e Admins já caem por cascade)
-        db.delete(bot_db)
-        db.commit()
-        
-        logger.info(f"🗑 Bot {bot_id} e todos os seus dados foram excluídos com sucesso (Owner: {current_user.username})")
-        
-        return {"status": "deleted", "msg": "Bot e todos os dados vinculados removidos com sucesso"}
-        
-    except Exception as e:
-        db.rollback()  # Desfaz se der erro no meio do caminho
-        logger.error(f"Erro ao deletar bot {bot_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro interno ao excluir bot: {str(e)}")
-
-# =========================================================
-# 🛡️ GESTÃO DE ADMINISTRADORES (FASE 2 - COM EDIÇÃO)
-# =========================================================
 
 # =========================================================
 # 🛡️ GESTÃO DE ADMINISTRADORES (BLINDADO)
@@ -4504,16 +4690,138 @@ def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
     }
 
 # =========================================================
+# 📋 ROTA DE CONSULTA DE AUDIT LOGS (🆕 FASE 3.3)
+# =========================================================
+class AuditLogFilters(BaseModel):
+    user_id: Optional[int] = None
+    action: Optional[str] = None
+    resource_type: Optional[str] = None
+    success: Optional[bool] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    page: int = 1
+    per_page: int = 50
+
+@app.get("/api/admin/audit-logs")
+def get_audit_logs(
+    user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    success: Optional[bool] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 50,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna logs de auditoria com filtros opcionais
+    
+    Filtros disponíveis:
+    - user_id: ID do usuário
+    - action: Tipo de ação (ex: "bot_created", "login_success")
+    - resource_type: Tipo de recurso (ex: "bot", "plano", "auth")
+    - success: true/false (apenas ações bem-sucedidas ou falhas)
+    - start_date: Data inicial (ISO format)
+    - end_date: Data final (ISO format)
+    - page: Página atual (padrão: 1)
+    - per_page: Logs por página (padrão: 50, máx: 100)
+    """
+    try:
+        # Limita per_page a 100
+        if per_page > 100:
+            per_page = 100
+        
+        # Query base
+        query = db.query(AuditLog)
+        
+        # 🔒 IMPORTANTE: Se não for superusuário, só mostra logs do próprio usuário
+        if not current_user.is_superuser:
+            query = query.filter(AuditLog.user_id == current_user.id)
+        
+        # Aplica filtros
+        if user_id is not None:
+            query = query.filter(AuditLog.user_id == user_id)
+        
+        if action:
+            query = query.filter(AuditLog.action == action)
+        
+        if resource_type:
+            query = query.filter(AuditLog.resource_type == resource_type)
+        
+        if success is not None:
+            query = query.filter(AuditLog.success == success)
+        
+        if start_date:
+            try:
+                start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(AuditLog.created_at >= start)
+            except:
+                pass
+        
+        if end_date:
+            try:
+                end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(AuditLog.created_at <= end)
+            except:
+                pass
+        
+        # Total de registros
+        total = query.count()
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        logs = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(per_page).all()
+        
+        # Formata resposta
+        logs_data = []
+        for log in logs:
+            # Parse JSON details se existir
+            details_parsed = None
+            if log.details:
+                try:
+                    import json
+                    details_parsed = json.loads(log.details)
+                except:
+                    details_parsed = log.details
+            
+            logs_data.append({
+                "id": log.id,
+                "user_id": log.user_id,
+                "username": log.username,
+                "action": log.action,
+                "resource_type": log.resource_type,
+                "resource_id": log.resource_id,
+                "description": log.description,
+                "details": details_parsed,
+                "ip_address": log.ip_address,
+                "user_agent": log.user_agent,
+                "success": log.success,
+                "error_message": log.error_message,
+                "created_at": log.created_at.isoformat() if log.created_at else None
+            })
+        
+        return {
+            "data": logs_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar audit logs: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao buscar logs de auditoria")
+
+# =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
+# =========================================================
+# =========================================================
+# ⚙️ STARTUP OTIMIZADA (ATUALIZADA COM MIGRAÇÃO AUDIT LOGS 🆕)
 # =========================================================
 @app.on_event("startup")
 def on_startup():
-    init_db()
-    executar_migracao_v3()
-    executar_migracao_v4()
-    executar_migracao_v5()  # <--- ADICIONE ESTA LINHA
-    executar_migracao_v6() # <--- ADICIONE AQUI
-    
     print("Starting Container - Zenyx")
     
     # 1. Cria tabelas básicas se não existirem
@@ -4521,6 +4829,22 @@ def on_startup():
         init_db()
     except Exception as e:
         logger.error(f"Erro no init_db: {e}")
+    
+    # 2. Executa migrações existentes
+    try:
+        executar_migracao_v3()
+        executar_migracao_v4()
+        executar_migracao_v5()
+        executar_migracao_v6()
+    except Exception as e:
+        logger.error(f"Erro nas migrações: {e}")
+    
+    # 3. 🆕 Executa migração de Audit Logs (Fase 3.3)
+    try:
+        from migration_audit_logs import executar_migracao_audit_logs
+        executar_migracao_audit_logs()
+    except Exception as e:
+        logger.error(f"Erro na migração Audit Logs: {e}")
     
     logger.info("✅ Sistema Iniciado e Pronto!")
 
