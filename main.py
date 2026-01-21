@@ -759,7 +759,6 @@ def get_pushin_token():
         return os.getenv("PUSHIN_PAY_TOKEN")
     finally:
         db.close()
-
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
 # =========================================================
@@ -777,8 +776,8 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
         "Accept": "application/json"
     }
     
-    # URL DO RAILWAY FIXA (Garante que o Webhook chegue)
-    seus_dominio = "https://zenyx-gbs-testesv1-production.up.railway.app" 
+    # 🔧 CORRIGIDO: Domínio SEM https:// (será adicionado no payload)
+    seus_dominio = "zenyx-gbs-testesv1-production.up.railway.app" 
     
     payload = {
         "value": int(valor_float * 100), 
