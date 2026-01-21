@@ -8,7 +8,6 @@ import threading
 from telebot import types
 import json
 import uuid
-import shortuuid  # <--- ADICIONE ISSO NOS IMPORTS
 
 # --- IMPORTS CORRIGIDOS ---
 from sqlalchemy import func, desc, text
