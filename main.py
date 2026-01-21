@@ -763,6 +763,9 @@ def get_pushin_token():
 # =========================================================
 # 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
 # =========================================================
+# =========================================================
+# 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
+# =========================================================
 def get_plataforma_pushin_id(db: Session) -> str:
     """
     Retorna o pushin_pay_id da plataforma Zenyx para receber as taxas.
@@ -774,11 +777,11 @@ def get_plataforma_pushin_id(db: Session) -> str:
     try:
         # 1. Tenta buscar da SystemConfig
         config = db.query(SystemConfig).filter(
-            SystemConfig.chave == "pushin_plataforma_id"
+            SystemConfig.key == "pushin_plataforma_id"  # ✅ CORRIGIDO: key ao invés de chave
         ).first()
         
-        if config and config.valor:
-            return config.valor
+        if config and config.value:  # ✅ CORRIGIDO: value ao invés de valor
+            return config.value
         
         # 2. Busca o primeiro Super Admin com pushin_pay_id configurado
         from database import User
@@ -5659,22 +5662,21 @@ def on_startup():
     try:
         db = SessionLocal()
         config = db.query(SystemConfig).filter(
-            SystemConfig.chave == "pushin_plataforma_id"
+            SystemConfig.key == "pushin_plataforma_id"  # ✅ CORRIGIDO: key ao invés de chave
         ).first()
         
         if not config:
             # Cria a configuração vazia se não existir
             config = SystemConfig(
-                chave="pushin_plataforma_id",
-                valor="",  # ⚠️ SERÁ PREENCHIDO DEPOIS VIA PAINEL OU BANCO
-                descricao="ID da conta Pushin Pay da plataforma Zenyx para receber taxas de split"
+                key="pushin_plataforma_id",  # ✅ CORRIGIDO: key ao invés de chave
+                value=""  # ✅ CORRIGIDO: value ao invés de valor
             )
             db.add(config)
             db.commit()
             logger.info("✅ SystemConfig 'pushin_plataforma_id' criada! Configure o valor no banco ou via painel.")
         else:
-            if config.valor:
-                logger.info(f"✅ Pushin Pay ID da plataforma configurado: {config.valor[:8]}...")
+            if config.value:  # ✅ CORRIGIDO: value ao invés de valor
+                logger.info(f"✅ Pushin Pay ID da plataforma configurado: {config.value[:8]}...")
             else:
                 logger.warning("⚠️ Pushin Pay ID da plataforma não está preenchido. Split desabilitado.")
         
