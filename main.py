@@ -4803,6 +4803,9 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
+# =========================================================
+# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
+# =========================================================
 @app.get("/api/profile/stats")
 def get_profile_stats(
     db: Session = Depends(get_db),
@@ -4812,20 +4815,18 @@ def get_profile_stats(
     Retorna estatísticas do perfil do usuário logado.
     
     🆕 LÓGICA ESPECIAL PARA SUPER ADMIN:
-    - Se for super admin com pushin_pay_id: calcula faturamento pelos splits (Todas as vendas * taxa)
+    - Se for super admin: calcula faturamento pelos splits (Todas as vendas * taxa)
     - Se for usuário normal: calcula pelos próprios pedidos
-    
-    ✅ CORREÇÃO: Evita lazy loading usando queries explícitas
     """
     try:
+        # 👇 CORREÇÃO CRÍTICA: IMPORTAR OS MODELOS (User estava faltando)
+        from database import User, Bot, Pedido, Lead
+
         user_id = current_user.id
         
-        # 🔥 VERIFICA SE É SUPER ADMIN COM SPLIT CONFIGURADO
-        is_super_with_split = (
-            current_user.is_superuser and 
-            current_user.pushin_pay_id is not None and
-            current_user.pushin_pay_id != ""
-        )
+        # 🔥 LÓGICA FLEXÍVEL: BASTA SER SUPERUSER PARA VER OS DADOS GLOBAIS
+        # (Não exige mais o ID preenchido para visualizar, apenas para sacar)
+        is_super_with_split = current_user.is_superuser
         
         logger.info(f"📊 Profile Stats - User: {current_user.username}, Super: {is_super_with_split}")
         
@@ -4851,7 +4852,7 @@ def get_profile_stats(
             # Total de bots da plataforma (Visão Macro)
             total_bots = db.query(Bot).count()
             
-            # Total de membros da plataforma
+            # Total de membros da plataforma (AGORA VAI FUNCIONAR POIS IMPORTAMOS 'User')
             total_members = db.query(User).count()
             
         else:
@@ -4859,7 +4860,7 @@ def get_profile_stats(
             # 👤 CÁLCULO NORMAL PARA USUÁRIO COMUM
             # ============================================
             
-            # Busca todos os bots do usuário (✅ QUERY EXPLÍCITA)
+            # Busca todos os bots do usuário
             user_bots = db.query(Bot.id).filter(Bot.owner_id == user_id).all()
             bots_ids = [bot.id for bot in user_bots]
             
