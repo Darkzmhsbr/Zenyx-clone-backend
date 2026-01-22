@@ -1517,13 +1517,13 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
+
 @app.post("/api/auth/register", response_model=Token)
 def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
     """
     Registra um novo usuário no sistema
     🆕 Agora com log de auditoria
     """
-    # ✅ CORREÇÃO: Importar User ANTES de usar na validação
     from database import User 
 
     # Validações
@@ -1567,22 +1567,25 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
     )
     
     # Gera token JWT
-    # ✅ NOVO: Expiração dinâmica
-   if user_data.remember_me:
-       access_token_expires = timedelta(days=7)
-   else:
-       access_token_expires = timedelta(hours=12)
-   
-   access_token = create_access_token(
-       data={"sub": user.username, "user_id": user.id},
-       expires_delta=access_token_expires
-   )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": new_user.username, "user_id": new_user.id},
+        expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": new_user.id,
+        "username": new_user.username
+    }
+
 
 @app.post("/api/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     """
     Autentica usuário e retorna token JWT
-    🆕 Agora com log de auditoria
+    🆕 Agora com log de auditoria e remember_me
     """
     from database import User
     
@@ -1623,8 +1626,12 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         user_agent=request.headers.get("user-agent")
     )
     
-    # Gera token JWT
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # ✅ NOVO: Expiração dinâmica baseada em remember_me
+    if user_data.remember_me:
+        access_token_expires = timedelta(days=7)
+    else:
+        access_token_expires = timedelta(hours=12)
+    
     access_token = create_access_token(
         data={"sub": user.username, "user_id": user.id},
         expires_delta=access_token_expires
@@ -1637,8 +1644,9 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         "username": user.username
     }
 
+
 # =========================================================
-# 🆕 ROTA DE LOGIN GOOGLE (ADICIONE NO MAIN.PY)
+# 🆕 ROTA DE LOGIN GOOGLE
 # =========================================================
 
 class GoogleLoginRequest(BaseModel):
@@ -1660,7 +1668,6 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
         # 2. Pega os dados do usuário
         email = idinfo['email']
         name = idinfo.get('name', 'Usuário Google')
-        # Cria um username baseado no email (antes do @)
         username_base = email.split('@')[0]
 
         # 3. Verifica se existe no banco
@@ -1671,7 +1678,7 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
             # 🆕 CRIA O USUÁRIO SE NÃO EXISTIR
             logger.info(f"🆕 Criando usuário via Google: {email}")
             
-            # Gera uma senha aleatória segura (o usuário não precisa saber)
+            # Gera uma senha aleatória segura
             random_password = secrets.token_urlsafe(32)
             hashed = get_password_hash(random_password)
 
@@ -1686,7 +1693,7 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(user)
         
-        # 4. Gera o Token JWT do seu sistema (Validade 7 dias)
+        # 4. Gera o Token JWT (7 dias para Google Login)
         access_token = create_access_token(
             data={"sub": user.username, "user_id": user.id},
             expires_delta=timedelta(days=7)
