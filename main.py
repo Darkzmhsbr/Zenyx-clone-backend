@@ -1,5 +1,7 @@
 import os
 import logging
+from dotenv import load_dotenv 
+load_dotenv()
 import telebot
 import requests
 import time
@@ -27,6 +29,10 @@ from jose import JWTError, jwt
 from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
+
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+import secrets # Para gerar senha aleatória
 
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
@@ -1621,6 +1627,76 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         "user_id": user.id,
         "username": user.username
     }
+
+# =========================================================
+# 🆕 ROTA DE LOGIN GOOGLE (ADICIONE NO MAIN.PY)
+# =========================================================
+
+class GoogleLoginRequest(BaseModel):
+    credential: str
+
+@app.post("/api/auth/google")
+def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
+    try:
+        # 👇 SEU CLIENT ID CONFIGURADO
+        CLIENT_ID = "851618246810-npe0qg47u8stb2s269n0g5bfbr4e0lo1.apps.googleusercontent.com"
+        
+        # 1. Valida o token com o Google
+        idinfo = id_token.verify_oauth2_token(
+            data.credential, 
+            google_requests.Request(), 
+            CLIENT_ID
+        )
+
+        # 2. Pega os dados do usuário
+        email = idinfo['email']
+        name = idinfo.get('name', 'Usuário Google')
+        # Cria um username baseado no email (antes do @)
+        username_base = email.split('@')[0]
+
+        # 3. Verifica se existe no banco
+        from database import User
+        user = db.query(User).filter(User.email == email).first()
+
+        if not user:
+            # 🆕 CRIA O USUÁRIO SE NÃO EXISTIR
+            logger.info(f"🆕 Criando usuário via Google: {email}")
+            
+            # Gera uma senha aleatória segura (o usuário não precisa saber)
+            random_password = secrets.token_urlsafe(32)
+            hashed = get_password_hash(random_password)
+
+            user = User(
+                username=username_base, 
+                email=email,
+                password_hash=hashed,
+                full_name=name,
+                is_active=True
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        
+        # 4. Gera o Token JWT do seu sistema (Validade 7 dias)
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=timedelta(days=7)
+        )
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username,
+            "full_name": user.full_name
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Token do Google inválido")
+    except Exception as e:
+        logger.error(f"Erro Google Login: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno no login social")
+
 
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
