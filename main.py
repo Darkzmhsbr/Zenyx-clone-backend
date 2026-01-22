@@ -1,7 +1,5 @@
 import os
 import logging
-from dotenv import load_dotenv 
-load_dotenv()
 import telebot
 import requests
 import time
@@ -55,19 +53,9 @@ try:
 except Exception as e:
     print(f"Erro na migração forçada: {e}")
 
-origins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "https://zenyx-gbs-testesv1-production.up.railway.app", # Seu Backend
-    "https://zenyx-gbs-testes-vf-1.vercel.app",             # 🆕 SEU FRONTEND VERCEL (Obrigatório!)
-    "*" # Em último caso, deixe * para testes, mas o ideal são os domínios acima
-]
-
-# Substitua a lista 'origins' e o 'add_middleware' por isso:
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 🔥 LIBERA GERAL (Para garantir que funcione)
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -92,9 +80,8 @@ class UserCreate(BaseModel):
     full_name: str = None
 
 class UserLogin(BaseModel):
-       username: str
-       password: str
-       remember_me: Optional[bool] = False  # ✅ NOVO
+    username: str
+    password: str
 
 # 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
 class PlatformUserUpdate(BaseModel):
@@ -1517,13 +1504,13 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
-
 @app.post("/api/auth/register", response_model=Token)
 def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
     """
     Registra um novo usuário no sistema
     🆕 Agora com log de auditoria
     """
+    # ✅ CORREÇÃO: Importar User ANTES de usar na validação
     from database import User 
 
     # Validações
@@ -1580,12 +1567,11 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         "username": new_user.username
     }
 
-
 @app.post("/api/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     """
     Autentica usuário e retorna token JWT
-    🆕 Agora com log de auditoria e remember_me
+    🆕 Agora com log de auditoria
     """
     from database import User
     
@@ -1626,12 +1612,8 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         user_agent=request.headers.get("user-agent")
     )
     
-    # ✅ NOVO: Expiração dinâmica baseada em remember_me
-    if user_data.remember_me:
-        access_token_expires = timedelta(days=7)
-    else:
-        access_token_expires = timedelta(hours=12)
-    
+    # Gera token JWT
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username, "user_id": user.id},
         expires_delta=access_token_expires
@@ -1643,76 +1625,6 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         "user_id": user.id,
         "username": user.username
     }
-
-
-# =========================================================
-# 🆕 ROTA DE LOGIN GOOGLE
-# =========================================================
-
-class GoogleLoginRequest(BaseModel):
-    credential: str
-
-@app.post("/api/auth/google")
-def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
-    try:
-        # 👇 SEU CLIENT ID CONFIGURADO
-        CLIENT_ID = "851618246810-npe0qg47u8stb2s269n0g5bfbr4e0lo1.apps.googleusercontent.com"
-        
-        # 1. Valida o token com o Google
-        idinfo = id_token.verify_oauth2_token(
-            data.credential, 
-            google_requests.Request(), 
-            CLIENT_ID
-        )
-
-        # 2. Pega os dados do usuário
-        email = idinfo['email']
-        name = idinfo.get('name', 'Usuário Google')
-        username_base = email.split('@')[0]
-
-        # 3. Verifica se existe no banco
-        from database import User
-        user = db.query(User).filter(User.email == email).first()
-
-        if not user:
-            # 🆕 CRIA O USUÁRIO SE NÃO EXISTIR
-            logger.info(f"🆕 Criando usuário via Google: {email}")
-            
-            # Gera uma senha aleatória segura
-            random_password = secrets.token_urlsafe(32)
-            hashed = get_password_hash(random_password)
-
-            user = User(
-                username=username_base, 
-                email=email,
-                password_hash=hashed,
-                full_name=name,
-                is_active=True
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        
-        # 4. Gera o Token JWT (7 dias para Google Login)
-        access_token = create_access_token(
-            data={"sub": user.username, "user_id": user.id},
-            expires_delta=timedelta(days=7)
-        )
-
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user.id,
-            "username": user.username,
-            "full_name": user.full_name
-        }
-
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Token do Google inválido")
-    except Exception as e:
-        logger.error(f"Erro Google Login: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno no login social")
-
 
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
@@ -1728,6 +1640,99 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
         "is_superuser": current_user.is_superuser, 
         "is_active": current_user.is_active
     }
+
+# =========================================================
+# 🔐 ROTA DE LOGIN COM GOOGLE
+# =========================================================
+
+class GoogleLoginRequest(BaseModel):
+    credential: str
+
+@app.post("/api/auth/google")
+def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
+    """
+    Autentica usuário via Google OAuth
+    Cria conta automaticamente se não existir
+    """
+    try:
+        # 🔑 CLIENT ID do Google Cloud Console
+        CLIENT_ID = "851618246810-npe0qg47u8stb2s269n0g5bfbr4e0lo1.apps.googleusercontent.com"
+        
+        # 1️⃣ Valida o token com os servidores do Google
+        idinfo = id_token.verify_oauth2_token(
+            data.credential, 
+            google_requests.Request(), 
+            CLIENT_ID
+        )
+
+        # 2️⃣ Extrai informações do usuário
+        email = idinfo['email']
+        name = idinfo.get('name', 'Usuário Google')
+        google_id = idinfo.get('sub')  # ID único do Google
+        
+        # Cria username baseado no email (parte antes do @)
+        username_base = email.split('@')[0]
+
+        # 3️⃣ Verifica se usuário já existe no banco
+        from database import User
+        user = db.query(User).filter(User.email == email).first()
+
+        if not user:
+            # 🆕 Cria novo usuário automaticamente
+            logger.info(f"🆕 Criando usuário via Google: {email}")
+            
+            # Verifica se username já existe e adiciona número se necessário
+            base_username = username_base
+            counter = 1
+            while db.query(User).filter(User.username == username_base).first():
+                username_base = f"{base_username}{counter}"
+                counter += 1
+            
+            # Gera senha aleatória segura (usuário não precisa saber)
+            random_password = secrets.token_urlsafe(32)
+            hashed = get_password_hash(random_password)
+
+            # Cria o usuário
+            user = User(
+                username=username_base, 
+                email=email,
+                password_hash=hashed,
+                full_name=name,
+                is_active=True
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            
+            logger.info(f"✅ Usuário criado com sucesso: {username_base}")
+        else:
+            logger.info(f"✅ Usuário existente fazendo login via Google: {email}")
+        
+        # 4️⃣ Gera Token JWT do sistema (válido por 7 dias)
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=timedelta(days=7)
+        )
+
+        # 5️⃣ Retorna os dados para o frontend
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "email": user.email
+        }
+
+    except ValueError as e:
+        # Token do Google inválido ou expirado
+        logger.error(f"❌ Token do Google inválido: {e}")
+        raise HTTPException(status_code=401, detail="Token do Google inválido ou expirado")
+    
+    except Exception as e:
+        # Qualquer outro erro
+        logger.error(f"❌ Erro no Google Login: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno no login com Google")
 
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
 
@@ -6058,4 +6063,3 @@ def limpar_leads_que_viraram_pedidos(db: Session = Depends(get_db)):
         db.rollback()
         logger.error(f"Erro: {e}")
         return {"status": "error", "mensagem": str(e)}
-# (NÃO PODE TER NADA AQUI EMBAIXO, SÓ LINHA VAZIA)
