@@ -92,8 +92,9 @@ class UserCreate(BaseModel):
     full_name: str = None
 
 class UserLogin(BaseModel):
-    username: str
-    password: str
+       username: str
+       password: str
+       remember_me: Optional[bool] = False  # ✅ NOVO
 
 # 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
 class PlatformUserUpdate(BaseModel):
@@ -1566,18 +1567,16 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
     )
     
     # Gera token JWT
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": new_user.username, "user_id": new_user.id},
-        expires_delta=access_token_expires
-    )
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user_id": new_user.id,
-        "username": new_user.username
-    }
+    # ✅ NOVO: Expiração dinâmica
+   if user_data.remember_me:
+       access_token_expires = timedelta(days=7)
+   else:
+       access_token_expires = timedelta(hours=12)
+   
+   access_token = create_access_token(
+       data={"sub": user.username, "user_id": user.id},
+       expires_delta=access_token_expires
+   )
 
 @app.post("/api/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
