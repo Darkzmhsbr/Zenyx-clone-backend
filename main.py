@@ -31,7 +31,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -343,6 +343,27 @@ def log_action(
         logger.error(f"❌ Erro ao criar log de auditoria: {e}")
         # Não propaga o erro para não quebrar a operação principal
         db.rollback()
+
+# =========================================================
+# 🔔 SISTEMA DE NOTIFICAÇÕES (HELPER)
+# =========================================================
+def create_notification(db: Session, user_id: int, title: str, message: str, type: str = "info"):
+    """
+    Cria uma notificação real para o usuário no painel.
+    Types: info (azul), success (verde), warning (amarelo), error (vermelho)
+    """
+    try:
+        notif = Notification(
+            user_id=user_id,
+            title=title,
+            message=message,
+            type=type
+        )
+        db.add(notif)
+        db.commit()
+        # Não damos refresh aqui para não travar processos rápidos, fire and forget
+    except Exception as e:
+        logger.error(f"Erro ao criar notificação: {e}")
 
 # ============================================================
 # 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
@@ -1926,6 +1947,7 @@ def deletar_bot(
     return {"status": "deletado", "bot_nome": nome_bot}
 
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
+# --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
 def toggle_bot(
     bot_id: int, 
@@ -1940,17 +1962,34 @@ def toggle_bot(
     bot.status = novo_status
     db.commit()
     
-    # 🔔 Notifica Admin (EM HTML)
+    # 🔔 Notifica Admin (Telegram - EM HTML)
     try:
         emoji = "🟢" if novo_status == "ativo" else "🔴"
         msg = f"{emoji} <b>STATUS DO BOT ALTERADO</b>\n\nO bot <b>{bot.nome}</b> agora está: <b>{novo_status.upper()}</b>"
         notificar_admin_principal(bot, msg)
     except Exception as e:
         logger.error(f"Erro ao notificar admin sobre toggle: {e}")
+
+    # =========================================================
+    # 🔔 SISTEMA DE NOTIFICAÇÃO (NOVO - PAINEL DO SITE)
+    # =========================================================
+    try:
+        msg_status = "Ativado" if novo_status == "ativo" else "Pausado"
+        tipo_notif = "success" if novo_status == "ativo" else "warning"
+        
+        # Cria notificação para o dono do bot no painel (Sino)
+        if bot.owner_id:
+            create_notification(
+                db=db, 
+                user_id=bot.owner_id, 
+                title=f"Bot {bot.nome} {msg_status}", 
+                message=f"O status do seu bot foi alterado para {msg_status}.",
+                type=tipo_notif
+            )
+    except Exception as e:
+        logger.error(f"Erro ao criar notificação interna: {e}")
     
-    logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner: {current_user.username})")
-    
-    return {"status": novo_status}
+    logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner:
 
 # =========================================================
 # 🛡️ GESTÃO DE ADMINISTRADORES (BLINDADO)
@@ -5839,6 +5878,63 @@ def promote_user_to_superadmin(
     except Exception as e:
         logger.error(f"Erro ao promover/rebaixar usuário: {e}")
         raise HTTPException(status_code=500, detail="Erro ao alterar status de super-admin")
+
+# =========================================================
+# 🔔 ROTAS DE NOTIFICAÇÕES
+# =========================================================
+@app.get("/api/notifications")
+def get_notifications(
+    limit: int = 20, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Retorna as notificações do usuário logado"""
+    notifs = db.query(Notification).filter(
+        Notification.user_id == current_user.id
+    ).order_by(desc(Notification.created_at)).limit(limit).all()
+    
+    # Conta não lidas
+    unread_count = db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.read == False
+    ).count()
+    
+    return {
+        "notifications": notifs,
+        "unread_count": unread_count
+    }
+
+@app.put("/api/notifications/read-all")
+def mark_all_read(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Marca todas como lidas"""
+    db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.read == False
+    ).update({"read": True})
+    
+    db.commit()
+    return {"status": "ok"}
+
+@app.put("/api/notifications/{notif_id}/read")
+def mark_one_read(
+    notif_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Marca uma específica como lida"""
+    notif = db.query(Notification).filter(
+        Notification.id == notif_id,
+        Notification.user_id == current_user.id
+    ).first()
+    
+    if notif:
+        notif.read = True
+        db.commit()
+    
+    return {"status": "ok"}
 
 # =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)

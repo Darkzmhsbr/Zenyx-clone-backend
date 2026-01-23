@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import QueuePool
@@ -31,7 +31,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 # =========================================================
-# 👤 USUÁRIOS (NOVO - FASE 1 AUTENTICAÇÃO)
+# 👤 USUÁRIOS
 # =========================================================
 class User(Base):
     __tablename__ = "users"
@@ -48,15 +48,16 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # 🆕 NOVOS CAMPOS FINANCEIROS (ADICIONADOS AGORA)
+    # 🆕 NOVOS CAMPOS FINANCEIROS
     pushin_pay_id = Column(String, nullable=True) # ID da conta do membro na Pushin
     taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
 
     # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
     
-    # 🆕 FASE 3.3: Relacionamento com logs de auditoria
+    # Relacionamentos de Logs e Notificações
     audit_logs = relationship("AuditLog", back_populates="user")
+    notifications = relationship("Notification", back_populates="user") # 🔥 ADICIONADO PARA O SISTEMA DE NOTIFICAÇÃO
 
 # =========================================================
 # ⚙️ CONFIGURAÇÕES GERAIS
@@ -200,7 +201,7 @@ class BotFlow(Base):
     bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
     bot = relationship("Bot", back_populates="fluxo")
     
-    # --- CONFIGURAÇÃO DE MODO DE INÍCIO (NOVO) ---
+    # --- CONFIGURAÇÃO DE MODO DE INÍCIO ---
     start_mode = Column(String, default="padrao") # 'padrao', 'miniapp'
     miniapp_url = Column(String, nullable=True)   # URL da loja externa
     miniapp_btn_text = Column(String, default="🛒 ABRIR LOJA")
@@ -417,7 +418,7 @@ class MiniAppCategory(Base):
     bot = relationship("Bot", back_populates="miniapp_categories")
 
 # =========================================================
-# 📋 AUDIT LOGS (🆕 FASE 3.3 - AUDITORIA)
+# 📋 AUDIT LOGS (FASE 3.3 - AUDITORIA)
 # =========================================================
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -450,3 +451,22 @@ class AuditLog(Base):
     
     # Relacionamento
     user = relationship("User", back_populates="audit_logs")
+
+# =========================================================
+# 🔔 NOTIFICAÇÕES REAIS (NOVA TABELA - ATUALIZAÇÃO)
+# =========================================================
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    
+    title = Column(String, nullable=False)       # Ex: "Venda Aprovada"
+    message = Column(String, nullable=False)     # Ex: "João comprou Plano VIP"
+    type = Column(String, default="info")        # info, success, warning, error
+    read = Column(Boolean, default=False)        # Se o usuário já leu
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relacionamento com Usuário
+    user = relationship("User", back_populates="notifications")
