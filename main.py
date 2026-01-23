@@ -1530,19 +1530,19 @@ def verify_turnstile(token: str) -> bool:
 # =========================================================
 
 class LoginRequest(BaseModel):
-    email: str              # ❌ PROBLEMA 1
+    username: str        # ✅ CORRIGIDO
     password: str
     turnstile_token: str
 
 @app.post("/api/auth/login")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
+def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """
     Login com verificação Cloudflare Turnstile
     """
     try:
         logger.info("=" * 60)
         logger.info("🔐 LOGIN: Requisição recebida")
-        logger.info(f"📧 Email: {data.email}")  # ❌ PROBLEMA 2
+        logger.info(f"👤 Username: {data.username}")  # ✅ CORRIGIDO
         
         # 🛡️ ETAPA 1: Verificar Turnstile
         logger.info("🛡️ Verificando Cloudflare Turnstile...")
@@ -1557,30 +1557,32 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         logger.info("🔍 Buscando usuário no banco...")
         from database import User
         
-        user = db.query(User).filter(User.email == data.email).first()  # ❌ PROBLEMA 3
+        # ✅ CORRIGIDO: Busca por username
+        user = db.query(User).filter(User.username == data.username).first()
         
         if not user:
-            logger.warning(f"❌ Usuário não encontrado: {data.email}")  # ❌ PROBLEMA 4
+            logger.warning(f"❌ Usuário não encontrado: {data.username}")
             raise HTTPException(
                 status_code=401,
-                detail="Email ou senha incorretos"  # ❌ PROBLEMA 5
+                detail="Usuário ou senha incorretos"
             )
         
         # Verifica senha
         if not verify_password(data.password, user.password_hash):
-            logger.warning(f"❌ Senha incorreta para: {data.email}")  # ❌ PROBLEMA 6
+            logger.warning(f"❌ Senha incorreta para: {data.username}")
             raise HTTPException(
                 status_code=401,
-                detail="Email ou senha incorretos"  # ❌ PROBLEMA 7
+                detail="Usuário ou senha incorretos"
             )
         
         logger.info(f"✅ Credenciais válidas para: {user.username}")
         
         # 🎫 ETAPA 3: Gerar JWT
         logger.info("🎫 Gerando token JWT...")
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": user.username, "user_id": user.id},
-            expires_delta=timedelta(days=7)
+            expires_delta=access_token_expires
         )
         
         # 📦 ETAPA 4: Retornar dados
