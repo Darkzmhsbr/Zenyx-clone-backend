@@ -67,43 +67,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
 # =========================================================
-# 🔑 CLOUDFLARE TURNSTILE - CONFIGURAÇÃO
-# =========================================================
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0"
-
-def verify_turnstile(token: str) -> bool:
-    """
-    Verifica token do Cloudflare Turnstile
-    
-    Returns:
-        True se verificação passou
-        False se falhou
-    """
-    try:
-        response = requests.post(
-            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-            data={
-                'secret': TURNSTILE_SECRET_KEY,
-                'response': token
-            },
-            timeout=5
-        )
-        
-        result = response.json()
-        success = result.get('success', False)
-        
-        if success:
-            logger.info("✅ Turnstile: Verificação bem-sucedida")
-        else:
-            logger.warning(f"❌ Turnstile: Verificação falhou - {result.get('error-codes', [])}")
-        
-        return success
-        
-    except Exception as e:
-        logger.error(f"❌ Erro ao verificar Turnstile: {e}")
-        return False
-
-# =========================================================
 # 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
 # =========================================================
 class UserCreate(BaseModel):
@@ -111,10 +74,12 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     full_name: str = None
+    turnstile_token: str # 🔥 NOVO CAMPO OBRIGATÓRIO
 
 class UserLogin(BaseModel):
     username: str
     password: str
+    turnstile_token: str # 🔥 NOVO CAMPO OBRIGATÓRIO
 
 # 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
 class PlatformUserUpdate(BaseModel):
@@ -131,6 +96,30 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: str = None
+
+# =========================================================
+# 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE
+# =========================================================
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Peguei da sua imagem
+
+def verify_turnstile(token: str) -> bool:
+    """Verifica se o token do Turnstile é válido"""
+    if not token:
+        return False
+        
+    try:
+        url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+        payload = {
+            "secret": TURNSTILE_SECRET_KEY,
+            "response": token
+        }
+        response = requests.post(url, data=payload, timeout=5)
+        result = response.json()
+        
+        return result.get("success", False)
+    except Exception as e:
+        logger.error(f"Erro ao verificar Turnstile: {e}")
+        return False
 
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA SUPER ADMIN (🆕 FASE 3.4)
@@ -1540,13 +1529,18 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 @app.post("/api/auth/register", response_model=Token)
 def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
     """
-    Registra um novo usuário no sistema
-    🆕 Agora com log de auditoria
+    Registra um novo usuário no sistema (COM PROTEÇÃO TURNSTILE)
     """
-    # ✅ CORREÇÃO: Importar User ANTES de usar na validação
     from database import User 
 
-    # Validações
+    # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
+    if not verify_turnstile(user_data.turnstile_token):
+        # Log da tentativa falha
+        log_action(db=db, user_id=0, username=user_data.username, action="register_bot_blocked", resource_type="auth", 
+                   description="Bloqueado pelo Turnstile (Robô detectado)", success=False, ip_address=get_client_ip(request))
+        raise HTTPException(status_code=400, detail="Verificação de segurança falhou. Atualize a página e tente novamente.")
+
+    # Validações normais
     existing_user = db.query(User).filter(User.username == user_data.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Username já existe")
@@ -1569,22 +1563,10 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
     db.commit()
     db.refresh(new_user)
     
-    # 📋 AUDITORIA: Registro de novo usuário
-    log_action(
-        db=db,
-        user_id=new_user.id,
-        username=new_user.username,
-        action="user_registered",
-        resource_type="auth",
-        resource_id=new_user.id,
-        description=f"Novo usuário registrado: {new_user.username}",
-        details={
-            "email": new_user.email,
-            "full_name": new_user.full_name
-        },
-        ip_address=get_client_ip(request),
-        user_agent=request.headers.get("user-agent")
-    )
+    # 📋 AUDITORIA
+    log_action(db=db, user_id=new_user.id, username=new_user.username, action="user_registered", resource_type="auth", 
+               resource_id=new_user.id, description=f"Novo usuário registrado: {new_user.username}", 
+               details={"email": new_user.email}, ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     
     # Gera token JWT
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -1600,133 +1582,50 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         "username": new_user.username
     }
 
-# =========================================================
-# 🔐 ROTA DE LOGIN COM TURNSTILE
-# =========================================================
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-    turnstile_token: str
-
-@app.post("/api/auth/login")
-def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
+@app.post("/api/auth/login", response_model=Token)
+def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     """
-    Autentica usuário com verificação Turnstile
+    Autentica usuário e retorna token JWT (COM PROTEÇÃO TURNSTILE)
     """
-    try:
-        logger.info("=" * 60)
-        logger.info("🔐 LOGIN: Requisição recebida")
-        logger.info(f"👤 Username: {data.username}")
-        
-        # 🛡️ ETAPA 1: Verificar Turnstile
-        logger.info("🛡️ Verificando Cloudflare Turnstile...")
-        
-        if not verify_turnstile(data.turnstile_token):
-            raise HTTPException(
-                status_code=400,
-                detail="Verificação de segurança falhou. Tente novamente."
-            )
-        
-        logger.info("✅ Turnstile verificado com sucesso")
-        
-        # 🔐 ETAPA 2: Verificar credenciais
-        logger.info("🔍 Buscando usuário no banco...")
-        from database import User
-        
-        user = db.query(User).filter(User.username == data.username).first()
-        
-        if not user:
-            logger.warning(f"❌ Usuário não encontrado: {data.username}")
-            
-            # 📋 AUDITORIA: Tentativa de login com usuário inexistente
-            log_action(
-                db=db,
-                user_id=0,
-                username=data.username,
-                action="login_failed",
-                resource_type="auth",
-                description=f"Tentativa de login falhou: usuário não encontrado",
-                success=False,
-                error_message="Usuário não encontrado",
-                ip_address=get_client_ip(request),
-                user_agent=request.headers.get("user-agent")
-            )
-            
-            raise HTTPException(
-                status_code=401,
-                detail="Usuário ou senha incorretos"
-            )
-        
-        # Verifica senha
-        if not verify_password(data.password, user.password_hash):
-            logger.warning(f"❌ Senha incorreta para: {data.username}")
-            
-            # 📋 AUDITORIA: Senha incorreta
-            log_action(
-                db=db,
-                user_id=user.id,
-                username=user.username,
-                action="login_failed",
-                resource_type="auth",
-                description=f"Tentativa de login falhou: senha incorreta",
-                success=False,
-                error_message="Senha incorreta",
-                ip_address=get_client_ip(request),
-                user_agent=request.headers.get("user-agent")
-            )
-            
-            raise HTTPException(
-                status_code=401,
-                detail="Usuário ou senha incorretos"
-            )
-        
-        logger.info(f"✅ Credenciais válidas para: {user.username}")
-        
-        # 📋 AUDITORIA: Login bem-sucedido
-        log_action(
-            db=db,
-            user_id=user.id,
-            username=user.username,
-            action="login_success",
-            resource_type="auth",
-            description=f"Login bem-sucedido com Turnstile",
-            ip_address=get_client_ip(request),
-            user_agent=request.headers.get("user-agent")
-        )
-        
-        # 🎫 ETAPA 3: Gerar JWT
-        logger.info("🎫 Gerando token JWT...")
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user.username, "user_id": user.id},
-            expires_delta=access_token_expires
-        )
-        
-        # 📦 ETAPA 4: Retornar dados
-        response_data = {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user.id,
-            "username": user.username
-        }
-        
-        logger.info(f"✅ LOGIN BEM-SUCEDIDO: {user.username}")
-        logger.info("=" * 60)
-        
-        return response_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ ERRO no login: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail="Erro interno no servidor"
-        )
+    from database import User
+    
+    # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
+    # Nota: Em desenvolvimento, as vezes queremos pular isso, mas em produção é essencial.
+    if not verify_turnstile(user_data.turnstile_token):
+         log_action(db=db, user_id=0, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
+                   description="Login bloqueado pelo Turnstile", success=False, ip_address=get_client_ip(request))
+         raise HTTPException(status_code=400, detail="Verificação de segurança falhou. Tente novamente.")
 
+    # Busca usuário
+    user = db.query(User).filter(User.username == user_data.username).first()
+    
+    # Verifica credenciais
+    if not user or not verify_password(user_data.password, user.password_hash):
+        if user:
+            log_action(db=db, user_id=user.id, username=user.username, action="login_failed", resource_type="auth", 
+                       description="Tentativa de login falhou: senha incorreta", success=False, error_message="Senha incorreta", 
+                       ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+        
+        raise HTTPException(status_code=401, detail="Credenciais inválidas")
+    
+    # Auditoria Sucesso
+    log_action(db=db, user_id=user.id, username=user.username, action="login_success", resource_type="auth", 
+               description="Login bem-sucedido", ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    
+    # Gera token JWT
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username, "user_id": user.id},
+        expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user.id,
+        "username": user.username
+    }
+    
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
     """
