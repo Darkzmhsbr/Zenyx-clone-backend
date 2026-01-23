@@ -77,14 +77,12 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     full_name: str = None
-    # Opcional para não dar erro de validação automática, validamos manualmente na rota
-    turnstile_token: Optional[str] = None 
+    turnstile_token: Optional[str] = None # 🔥 Opcional para não travar validação
 
 class UserLogin(BaseModel):
     username: str
     password: str
-    # Opcional para não dar erro de validação automática
-    turnstile_token: Optional[str] = None
+    turnstile_token: Optional[str] = None # 🔥 Opcional para não travar validação
 
 # 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
 class PlatformUserUpdate(BaseModel):
@@ -108,9 +106,9 @@ class TokenData(BaseModel):
 TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Sua chave secreta
 
 def verify_turnstile(token: str) -> bool:
-    """Verifica token com tratamento de erro para não derrubar o server"""
-    if not token or len(token) < 5:
-        logger.warning("⚠️ Turnstile: Token vazio ou inválido recebido.")
+    """Verifica token com tratamento de erro para não derrubar o servidor"""
+    # Se não tiver token, retornamos False (bloqueia), mas não crasha
+    if not token:
         return False
         
     try:
@@ -119,19 +117,13 @@ def verify_turnstile(token: str) -> bool:
             "secret": TURNSTILE_SECRET_KEY,
             "response": token
         }
-        # Timeout é CRUCIAL. Se o Cloudflare demorar, seu servidor não pode travar.
+        # Timeout de 5s é OBRIGATÓRIO. Se a Cloudflare demorar, seu site não pode travar.
         response = requests.post(url, data=payload, timeout=5) 
         result = response.json()
-        
-        if not result.get("success", False):
-            logger.warning(f"❌ Turnstile Rejeitado: {result.get('error-codes')}")
-            return False
-            
-        return True
+        return result.get("success", False)
     except Exception as e:
-        logger.error(f"❌ Erro de conexão com Cloudstile: {e}")
-        # Em caso de erro de conexão com a Cloudflare, decidimos se bloqueamos ou liberamos.
-        # Por segurança, bloqueamos.
+        # Se der erro de conexão, loga o erro mas mantém o servidor de pé
+        print(f"⚠️ Erro silencioso no Turnstile: {e}")
         return False
 
 # =========================================================
