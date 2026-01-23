@@ -28,10 +28,6 @@ from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
-import secrets # Para gerar senha aleatória
-
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
 import update_db 
