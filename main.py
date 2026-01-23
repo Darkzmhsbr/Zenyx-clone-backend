@@ -1653,9 +1653,7 @@ class GoogleLoginRequest(BaseModel):
 def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
     """
     Autentica usuário via Google OAuth
-    Cria conta automaticamente se não existir
-    
-    ✅ SOLUÇÃO TIMEOUT: Validação offline do token
+    Usa Cloudflare Worker como proxy para evitar timeout
     """
     try:
         logger.info("=" * 60)
@@ -1664,57 +1662,48 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
         # 🔑 CLIENT ID do Google Cloud Console
         CLIENT_ID = "851618246810-npe0qg47u8stb2s269n0g5bfbr4e0lo1.apps.googleusercontent.com"
         
-        # ✅ SOLUÇÃO TIMEOUT: Validação com timeout maior e fallback
-        logger.info("🔍 Validando token (com timeout de 10s)...")
+        # 🌐 URL do Cloudflare Worker (SUA URL!)
+        CLOUDFLARE_PROXY = "https://red-haze-f96e.luisdedeus2512.workers.dev"
+        
+        # ✅ SOLUÇÃO: Valida token via Cloudflare Worker
+        logger.info("🔍 Validando token via Cloudflare Worker...")
         
         try:
-            # Tenta validar com timeout de 10 segundos
-            import socket
-            socket.setdefaulttimeout(10)
-            
-            idinfo = id_token.verify_oauth2_token(
-                data.credential, 
-                google_requests.Request(), 
-                CLIENT_ID
+            # Chama Google tokeninfo API via Cloudflare Worker
+            response = requests.get(
+                f"{CLOUDFLARE_PROXY}/oauth2/v3/tokeninfo",
+                params={"id_token": data.credential},
+                timeout=10
             )
             
-            logger.info("✅ Token validado online com sucesso!")
+            if response.status_code != 200:
+                logger.error(f"❌ Resposta do worker: {response.status_code}")
+                logger.error(f"❌ Conteúdo: {response.text}")
+                raise ValueError(f"Token validation failed: {response.status_code}")
             
-        except Exception as validation_error:
-            logger.warning(f"⚠️ Validação online falhou: {validation_error}")
-            logger.info("🔄 Tentando validação alternativa...")
+            idinfo = response.json()
             
-            # 🆕 FALLBACK: Decodifica o token JWT sem validação completa
-            # (Ainda é seguro porque vamos verificar o email depois)
-            import json
-            import base64
+            logger.info("✅ Token validado via Cloudflare Worker!")
+            logger.info(f"🔍 Dados recebidos: {idinfo}")
             
-            try:
-                # JWT tem 3 partes: header.payload.signature
-                parts = data.credential.split('.')
-                if len(parts) != 3:
-                    raise ValueError("Token inválido")
-                
-                # Decodifica o payload (parte do meio)
-                payload = parts[1]
-                # Adiciona padding se necessário
-                payload += '=' * (4 - len(payload) % 4)
-                
-                # Decodifica de base64
-                decoded = base64.urlsafe_b64decode(payload)
-                idinfo = json.loads(decoded)
-                
-                logger.info("✅ Token decodificado com sucesso (modo offline)")
-                logger.info(f"🔍 Dados extraídos: {idinfo}")
-                
-            except Exception as decode_error:
-                logger.error(f"❌ Falha na decodificação: {decode_error}")
-                raise HTTPException(
-                    status_code=401, 
-                    detail="Token do Google inválido"
-                )
+        except requests.exceptions.Timeout:
+            logger.error("❌ Timeout ao validar token via Cloudflare")
+            raise HTTPException(
+                status_code=500,
+                detail="Timeout ao validar token com Google"
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Erro de rede: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Erro de conexão com serviço de validação"
+            )
 
-        # 2️⃣ Extrai informações do usuário
+        # 2️⃣ Verifica se token é do nosso app
+        if idinfo.get('aud') != CLIENT_ID:
+            raise ValueError("Token não é válido para este aplicativo")
+        
+        # 3️⃣ Extrai informações do usuário
         email = idinfo.get('email')
         name = idinfo.get('name', 'Usuário Google')
         google_id = idinfo.get('sub')
@@ -1729,7 +1718,7 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
         # Cria username baseado no email
         username_base = email.split('@')[0]
 
-        # 3️⃣ Verifica se usuário já existe no banco
+        # 4️⃣ Verifica se usuário já existe no banco
         from database import User
         logger.info("🔍 Consultando banco de dados...")
         user = db.query(User).filter(User.email == email).first()
@@ -1766,14 +1755,14 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
         else:
             logger.info(f"✅ Usuário existente: {email} (ID: {user.id})")
         
-        # 4️⃣ Gera Token JWT
+        # 5️⃣ Gera Token JWT
         logger.info("🔍 Gerando token JWT...")
         access_token = create_access_token(
             data={"sub": user.username, "user_id": user.id},
             expires_delta=timedelta(days=7)
         )
 
-        # 5️⃣ Retorna dados
+        # 6️⃣ Retorna dados
         response_data = {
             "access_token": access_token,
             "token_type": "bearer",
@@ -1800,29 +1789,6 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
         logger.error(f"❌ Traceback: {traceback.format_exc()}")
         logger.error("=" * 60)
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
-
-# =========================================================
-# COMO FUNCIONA A SOLUÇÃO:
-# =========================================================
-#
-# PROBLEMA: Railway dá timeout ao conectar com Google
-#
-# SOLUÇÃO:
-# 1. Tenta validação online (10s timeout)
-# 2. Se falhar → usa validação offline
-# 3. Decodifica o JWT localmente
-# 4. Extrai email e dados
-# 5. Cria/autentica usuário normalmente
-#
-# É SEGURO?
-# ✅ SIM! Porque:
-# - Token JWT vem assinado pelo Google
-# - Decodificamos apenas para ler o email
-# - Email é verificado no banco de dados
-# - Não aceitamos emails não verificados
-# - Token expira automaticamente
-#
-# =========================================================
 
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
 
