@@ -1442,65 +1442,6 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         "username": new_user.username
     }
 
-@app.post("/api/auth/login", response_model=Token)
-def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
-    """
-    Autentica usuário e retorna token JWT
-    🆕 Agora com log de auditoria
-    """
-    from database import User
-    
-    # Busca usuário
-    user = db.query(User).filter(User.username == user_data.username).first()
-    
-    # Verifica se usuário existe e senha está correta
-    if not user or not verify_password(user_data.password, user.password_hash):
-        # 📋 AUDITORIA: Login falhado
-        if user:
-            log_action(
-                db=db,
-                user_id=user.id,
-                username=user.username,
-                action="login_failed",
-                resource_type="auth",
-                description=f"Tentativa de login falhou: senha incorreta",
-                success=False,
-                error_message="Senha incorreta",
-                ip_address=get_client_ip(request),
-                user_agent=request.headers.get("user-agent")
-            )
-        
-        raise HTTPException(
-            status_code=401,
-            detail="Credenciais inválidas"
-        )
-    
-    # 📋 AUDITORIA: Login bem-sucedido
-    log_action(
-        db=db,
-        user_id=user.id,
-        username=user.username,
-        action="login_success",
-        resource_type="auth",
-        description=f"Login bem-sucedido",
-        ip_address=get_client_ip(request),
-        user_agent=request.headers.get("user-agent")
-    )
-    
-    # Gera token JWT
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username, "user_id": user.id},
-        expires_delta=access_token_expires
-    )
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user_id": user.id,
-        "username": user.username
-    }
-
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
     """
@@ -1589,7 +1530,7 @@ def verify_turnstile(token: str) -> bool:
 # =========================================================
 
 class LoginRequest(BaseModel):
-    email: str
+    email: str              # ❌ PROBLEMA 1
     password: str
     turnstile_token: str
 
@@ -1601,7 +1542,7 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     try:
         logger.info("=" * 60)
         logger.info("🔐 LOGIN: Requisição recebida")
-        logger.info(f"📧 Email: {data.email}")
+        logger.info(f"📧 Email: {data.email}")  # ❌ PROBLEMA 2
         
         # 🛡️ ETAPA 1: Verificar Turnstile
         logger.info("🛡️ Verificando Cloudflare Turnstile...")
@@ -1616,21 +1557,21 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         logger.info("🔍 Buscando usuário no banco...")
         from database import User
         
-        user = db.query(User).filter(User.email == data.email).first()
+        user = db.query(User).filter(User.email == data.email).first()  # ❌ PROBLEMA 3
         
         if not user:
-            logger.warning(f"❌ Usuário não encontrado: {data.email}")
+            logger.warning(f"❌ Usuário não encontrado: {data.email}")  # ❌ PROBLEMA 4
             raise HTTPException(
                 status_code=401,
-                detail="Email ou senha incorretos"
+                detail="Email ou senha incorretos"  # ❌ PROBLEMA 5
             )
         
         # Verifica senha
         if not verify_password(data.password, user.password_hash):
-            logger.warning(f"❌ Senha incorreta para: {data.email}")
+            logger.warning(f"❌ Senha incorreta para: {data.email}")  # ❌ PROBLEMA 6
             raise HTTPException(
                 status_code=401,
-                detail="Email ou senha incorretos"
+                detail="Email ou senha incorretos"  # ❌ PROBLEMA 7
             )
         
         logger.info(f"✅ Credenciais válidas para: {user.username}")
@@ -1661,112 +1602,6 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         logger.error(f"❌ ERRO no login: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail="Erro interno no servidor"
-        )
-
-
-# =========================================================
-# 📝 ROTA DE REGISTRO COM TURNSTILE
-# =========================================================
-
-class RegisterRequest(BaseModel):
-    username: str
-    email: str
-    password: str
-    full_name: str
-    turnstile_token: str
-
-@app.post("/api/auth/register")
-def register(data: RegisterRequest, db: Session = Depends(get_db)):
-    """
-    Registro com verificação Cloudflare Turnstile
-    """
-    try:
-        logger.info("=" * 60)
-        logger.info("📝 REGISTRO: Requisição recebida")
-        logger.info(f"👤 Username: {data.username}")
-        logger.info(f"📧 Email: {data.email}")
-        
-        # 🛡️ ETAPA 1: Verificar Turnstile
-        logger.info("🛡️ Verificando Cloudflare Turnstile...")
-        
-        if not verify_turnstile(data.turnstile_token):
-            raise HTTPException(
-                status_code=400,
-                detail="Verificação de segurança falhou. Tente novamente."
-            )
-        
-        # 🔍 ETAPA 2: Verificar se usuário já existe
-        logger.info("🔍 Verificando duplicatas...")
-        from database import User
-        
-        # Verifica username
-        existing_user = db.query(User).filter(User.username == data.username).first()
-        if existing_user:
-            logger.warning(f"❌ Username já existe: {data.username}")
-            raise HTTPException(
-                status_code=400,
-                detail="Username já está em uso"
-            )
-        
-        # Verifica email
-        existing_email = db.query(User).filter(User.email == data.email).first()
-        if existing_email:
-            logger.warning(f"❌ Email já existe: {data.email}")
-            raise HTTPException(
-                status_code=400,
-                detail="Email já está cadastrado"
-            )
-        
-        # 🔐 ETAPA 3: Criar usuário
-        logger.info("🔐 Hasheando senha...")
-        password_hash = get_password_hash(data.password)
-        
-        logger.info("💾 Criando usuário no banco...")
-        new_user = User(
-            username=data.username,
-            email=data.email,
-            password_hash=password_hash,
-            full_name=data.full_name,
-            is_active=True
-        )
-        
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        
-        logger.info(f"✅ Usuário criado: {new_user.username} (ID: {new_user.id})")
-        
-        # 🎫 ETAPA 4: Gerar JWT (auto-login)
-        logger.info("🎫 Gerando token JWT...")
-        access_token = create_access_token(
-            data={"sub": new_user.username, "user_id": new_user.id},
-            expires_delta=timedelta(days=7)
-        )
-        
-        # 📦 ETAPA 5: Retornar dados
-        response_data = {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": new_user.id,
-            "username": new_user.username,
-            "full_name": new_user.full_name,
-            "email": new_user.email
-        }
-        
-        logger.info(f"✅ REGISTRO BEM-SUCEDIDO: {new_user.username}")
-        logger.info("=" * 60)
-        
-        return response_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ ERRO no registro: {e}")
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(
