@@ -2507,45 +2507,58 @@ def salvar_fluxo(
 # 🔗 ROTAS DE TRACKING (RASTREAMENTO)
 # =========================================================
 # =========================================================
-# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - VERSÃO CORRIGIDA
-# =========================================================
-# ⚠️ SUBSTITUIR AS LINHAS 2468-2553 DO SEU main.py POR ESTE CÓDIGO
+# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - SEGURANÇA APLICADA
 # =========================================================
 
 @app.get("/api/admin/tracking/folders")
 def list_tracking_folders(
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
-    """Lista pastas com contagem de links E métricas somadas"""
+    """Lista pastas com métricas FILTRADAS pelo usuário"""
     try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
         folders = db.query(TrackingFolder).all()
         result = []
+        
         for f in folders:
-            # Conta links
-            link_count = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
+            # Se usuário não tem bots, tudo é zero
+            if not user_bot_ids:
+                result.append({
+                    "id": f.id, "nome": f.nome, "plataforma": f.plataforma,
+                    "link_count": 0, "total_clicks": 0, "total_vendas": 0,
+                    "created_at": f.created_at
+                })
+                continue
+
+            # Conta APENAS links dos bots do usuário nesta pasta
+            link_count = db.query(TrackingLink).filter(
+                TrackingLink.folder_id == f.id,
+                TrackingLink.bot_id.in_(user_bot_ids) # 🔥 Filtro de dono
+            ).count()
             
-            # Soma cliques e vendas de todos os links desta pasta
+            # Soma métricas APENAS dos links do usuário
             stats = db.query(
                 func.sum(TrackingLink.clicks).label('total_clicks'),
                 func.sum(TrackingLink.vendas).label('total_vendas')
-            ).filter(TrackingLink.folder_id == f.id).first()
+            ).filter(
+                TrackingLink.folder_id == f.id,
+                TrackingLink.bot_id.in_(user_bot_ids) # 🔥 Filtro de dono
+            ).first()
             
-            clicks = stats.total_clicks or 0
-            vendas = stats.total_vendas or 0
-
             result.append({
                 "id": f.id, 
                 "nome": f.nome, 
                 "plataforma": f.plataforma, 
                 "link_count": link_count,
-                "total_clicks": clicks,   # 🔥 Dado Real
-                "total_vendas": vendas,   # 🔥 Dado Real
+                "total_clicks": stats.total_clicks or 0,
+                "total_vendas": stats.total_vendas or 0,
                 "created_at": f.created_at
             })
         return result
     except Exception as e:
-        logger.error(f"Erro ao listar pastas: {e}")
+        logger.error(f"Erro listar pastas: {e}")
         return []
 
 @app.post("/api/admin/tracking/folders")
@@ -2561,8 +2574,8 @@ def create_tracking_folder(
         db.refresh(nova_pasta)
         return {"status": "ok", "id": nova_pasta.id}
     except Exception as e:
-        logger.error(f"Erro ao criar pasta: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
+        logger.error(f"Erro criar pasta: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno")
 
 @app.get("/api/admin/tracking/links/{folder_id}")
 def list_tracking_links(
@@ -2570,7 +2583,18 @@ def list_tracking_links(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
+    # Filtra links: Só mostra links que pertencem aos bots do usuário
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    
+    if not user_bot_ids:
+        return []
+
+    links = db.query(TrackingLink).filter(
+        TrackingLink.folder_id == folder_id,
+        TrackingLink.bot_id.in_(user_bot_ids) # 🔥 Filtro de dono
+    ).all()
+    
+    return links
 
 @app.post("/api/admin/tracking/links")
 def create_tracking_link(
@@ -2578,13 +2602,16 @@ def create_tracking_link(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    # Gera código aleatório se não informado
+    # Verifica se o bot pertence ao usuário
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    if dados.bot_id not in user_bot_ids:
+        raise HTTPException(403, "Você não tem permissão para criar links neste bot.")
+
     if not dados.codigo:
         import random, string
         chars = string.ascii_lowercase + string.digits
         dados.codigo = ''.join(random.choice(chars) for _ in range(8))
     
-    # Verifica duplicidade
     exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
     if exists:
         raise HTTPException(400, "Este código de rastreamento já existe.")
@@ -2601,24 +2628,28 @@ def create_tracking_link(
     return {"status": "ok", "link": novo_link}
 
 @app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(
-    fid: int, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    # Apaga links dentro da pasta primeiro
+def delete_folder(fid: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    # Nota: Pastas são globais no momento, ideal restringir delete apenas a admins ou quem criou
+    if not current_user.is_superuser:
+         raise HTTPException(403, "Apenas admins podem deletar pastas globais.")
+         
     db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
     db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
     db.commit()
     return {"status": "deleted"}
 
 @app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(
-    lid: int, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
+def delete_link(lid: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
+    if not link:
+        raise HTTPException(404, "Link não encontrado")
+        
+    # Verifica dono
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    if link.bot_id not in user_bot_ids:
+        raise HTTPException(403, "Não autorizado")
+
+    db.delete(link)
     db.commit()
     return {"status": "deleted"}
 
@@ -3631,24 +3662,35 @@ def listar_leads(
 # SUBSTITUA a rota existente por esta versão
 # Calcula estatísticas baseando-se no campo 'status' (não status_funil)
 # ============================================================
-
+# ============================================================
+# 🔥 ROTA ATUALIZADA: /api/admin/contacts/funnel-stats
+# ============================================================
 @app.get("/api/admin/contacts/funnel-stats")
 def obter_estatisticas_funil(
     bot_id: Optional[int] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # 🔒 ADICIONA AUTH
 ):
     """
-    🔥 [CORRIGIDO] Retorna contadores de cada estágio do funil
-    TOPO = Leads (tabela Lead)
-    MEIO = Pedidos com status 'pending' (gerou PIX mas não pagou)
-    FUNDO = Pedidos com status 'paid/active/approved' (pagou)
-    EXPIRADO = Pedidos com status 'expired'
+    🔥 [CORRIGIDO E SEGURO] Retorna contadores de cada estágio do funil
+    Filtra APENAS pelos bots do usuário logado.
     """
     try:
+        # 1. SEGURANÇA: Identificar bots do usuário
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        # Se usuário não tem bots, retorna tudo zero (Conta Nova)
+        if not user_bot_ids:
+            return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
+
+        # Validação: Se pediu um bot específico, verifica se é dono dele
+        if bot_id and bot_id not in user_bot_ids:
+             return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
+
         # ============================================================
         # TOPO: Contar LEADS (tabela Lead)
         # ============================================================
-        query_topo = db.query(Lead)
+        query_topo = db.query(Lead).filter(Lead.bot_id.in_(user_bot_ids))
         if bot_id:
             query_topo = query_topo.filter(Lead.bot_id == bot_id)
         topo = query_topo.count()
@@ -3656,7 +3698,10 @@ def obter_estatisticas_funil(
         # ============================================================
         # MEIO: Pedidos com status PENDING (gerou PIX, não pagou)
         # ============================================================
-        query_meio = db.query(Pedido).filter(Pedido.status == 'pending')
+        query_meio = db.query(Pedido).filter(
+            Pedido.status == 'pending',
+            Pedido.bot_id.in_(user_bot_ids)
+        )
         if bot_id:
             query_meio = query_meio.filter(Pedido.bot_id == bot_id)
         meio = query_meio.count()
@@ -3665,7 +3710,8 @@ def obter_estatisticas_funil(
         # FUNDO: Pedidos PAGOS (paid/active/approved)
         # ============================================================
         query_fundo = db.query(Pedido).filter(
-            Pedido.status.in_(['paid', 'active', 'approved'])
+            Pedido.status.in_(['paid', 'active', 'approved']),
+            Pedido.bot_id.in_(user_bot_ids)
         )
         if bot_id:
             query_fundo = query_fundo.filter(Pedido.bot_id == bot_id)
@@ -3674,7 +3720,10 @@ def obter_estatisticas_funil(
         # ============================================================
         # EXPIRADOS: Pedidos com status EXPIRED
         # ============================================================
-        query_expirados = db.query(Pedido).filter(Pedido.status == 'expired')
+        query_expirados = db.query(Pedido).filter(
+            Pedido.status == 'expired',
+            Pedido.bot_id.in_(user_bot_ids)
+        )
         if bot_id:
             query_expirados = query_expirados.filter(Pedido.bot_id == bot_id)
         expirados = query_expirados.count()
@@ -3682,6 +3731,7 @@ def obter_estatisticas_funil(
         # Total
         total = topo + meio + fundo + expirados
         
+        # LOG DO RESULTADO
         logger.info(f"📊 Estatísticas do funil: TOPO={topo}, MEIO={meio}, FUNDO={fundo}, EXPIRADOS={expirados}")
         
         return {
@@ -3695,14 +3745,7 @@ def obter_estatisticas_funil(
     except Exception as e:
         logger.error(f"Erro ao obter estatísticas do funil: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================
-# ROTA 3: ATUALIZAR ROTA DE CONTATOS EXISTENTE
-# ============================================================
-# Procure a rota @app.get("/api/admin/contacts") no seu main.py
-# e SUBSTITUA por esta versão atualizada:
-
+        
 # ============================================================
 # 🔥 ROTA ATUALIZADA: /api/admin/contacts
 # SUBSTITUA a rota existente por esta versão
@@ -3716,29 +3759,49 @@ def obter_estatisticas_funil(
 # ============================================================
 # 🔥 ROTA ATUALIZADA: /api/admin/contacts
 # ============================================================
+# ============================================================
+# 🔥 ROTA ATUALIZADA: /api/admin/contacts
+# ============================================================
 @app.get("/api/admin/contacts")
-async def get_contacts(
+def get_contacts(
     status: str = "todos",
     bot_id: Optional[int] = None,
     page: int = 1,
     per_page: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # 🔒 AUTH
 ):
     try:
-        offset = (page - 1) * per_page
-        all_contacts = []
+        # 1. SEGURANÇA: Identificar bots do usuário
+        user_bot_ids = [bot.id for bot in current_user.bots]
         
         # Helper para garantir data sem timezone
         def clean_date(dt):
             if not dt: return datetime.utcnow()
             return dt.replace(tzinfo=None)
 
-        # 1. Filtro TODOS (Mescla Leads + Pedidos)
+        # Se conta nova (sem bots), retorna vazio imediatamente
+        if not user_bot_ids:
+            return {
+                "data": [], "total": 0, "page": page, 
+                "per_page": per_page, "total_pages": 0
+            }
+
+        # Validação: Se pediu um bot específico, ele é seu?
+        if bot_id and bot_id not in user_bot_ids:
+            return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+
+        offset = (page - 1) * per_page
+        all_contacts = []
+
+        # ------------------------------------------------------------
+        # CENÁRIO 1: Filtro "TODOS" (Mescla Leads + Pedidos)
+        # ------------------------------------------------------------
         if status == "todos":
             contatos_unicos = {}
             
-            # Busca Leads
-            q_leads = db.query(Lead)
+            # A. Busca LEADS (Filtrado por user_bot_ids)
+            q_leads = db.query(Lead).filter(Lead.bot_id.in_(user_bot_ids))
             if bot_id: q_leads = q_leads.filter(Lead.bot_id == bot_id)
             leads = q_leads.all()
             
@@ -3759,8 +3822,8 @@ async def get_contacts(
                     "origem": "lead"
                 }
             
-            # Busca Pedidos (Sobrescreve)
-            q_pedidos = db.query(Pedido)
+            # B. Busca PEDIDOS (Filtrado por user_bot_ids)
+            q_pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(user_bot_ids))
             if bot_id: q_pedidos = q_pedidos.filter(Pedido.bot_id == bot_id)
             pedidos = q_pedidos.all()
             
@@ -3770,6 +3833,7 @@ async def get_contacts(
                 if p.status in ["paid", "approved", "active"]: st_funil = "fundo"
                 elif p.status == "expired": st_funil = "expirado"
                 
+                # Pedido sobrescreve Lead (pois é mais avançado)
                 contatos_unicos[tid] = {
                     "id": p.id,
                     "telegram_id": tid,
@@ -3786,6 +3850,7 @@ async def get_contacts(
                     "custom_expiration": p.custom_expiration
                 }
             
+            # Ordenação e Paginação Manual (pois unimos duas listas)
             all_contacts = list(contatos_unicos.values())
             all_contacts.sort(key=lambda x: x["created_at"], reverse=True)
             
@@ -3800,9 +3865,12 @@ async def get_contacts(
                 "total_pages": (total + per_page - 1) // per_page
             }
 
-        # 2. Outros Filtros (Consultam direto Pedido)
+        # ------------------------------------------------------------
+        # CENÁRIO 2: Outros Filtros (Direto no Banco)
+        # ------------------------------------------------------------
         else:
-            query = db.query(Pedido)
+            # Base query filtrada por bots do usuário
+            query = db.query(Pedido).filter(Pedido.bot_id.in_(user_bot_ids))
             if bot_id: query = query.filter(Pedido.bot_id == bot_id)
             
             if status == "meio" or status == "pendentes":
@@ -3813,6 +3881,8 @@ async def get_contacts(
                 query = query.filter(Pedido.status == "expired")
                 
             total = query.count()
+            # Ordenação por data
+            query = query.order_by(desc(Pedido.created_at))
             pedidos = query.offset(offset).limit(per_page).all()
             
             contacts = []
