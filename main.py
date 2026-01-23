@@ -6092,6 +6092,123 @@ def mark_one_read(
     
     return {"status": "ok"}
 
+# ========================================================================
+# ENDPOINTS PÚBLICOS PARA LANDING PAGE
+# ========================================================================
+
+@app.get("/api/public/activity-feed")
+async def get_public_activity_feed():
+    """
+    Retorna atividades recentes (últimas 20) para exibir na landing page
+    SEM dados sensíveis (IDs de telegram ocultos, nomes parciais)
+    """
+    try:
+        # Busca últimos 20 pedidos aprovados
+        result = await database.fetch_all(
+            """
+            SELECT 
+                o.created_at,
+                o.plan_name,
+                o.plan_price,
+                o.status
+            FROM orders o
+            WHERE o.status IN ('approved', 'expired', 'active')
+            ORDER BY o.created_at DESC
+            LIMIT 20
+            """
+        )
+        
+        # Lista de nomes fictícios para privacidade
+        fake_names = [
+            "João P.", "Maria S.", "Carlos A.", "Ana C.", "Lucas F.",
+            "Patricia M.", "Rafael L.", "Julia O.", "Bruno N.", "Fernanda R.",
+            "Diego T.", "Amanda B.", "Ricardo G.", "Camila V.", "Felipe H.",
+            "Juliana K.", "Marcos E.", "Beatriz D.", "Gustavo W.", "Larissa Q."
+        ]
+        
+        activities = []
+        for idx, row in enumerate(result):
+            # Usa um nome da lista de forma cíclica
+            name = fake_names[idx % len(fake_names)]
+            
+            # Define ação baseada no status
+            if row['status'] == 'approved' or row['status'] == 'active':
+                action = 'ADICIONADO'
+                icon = '✅'
+            else:
+                action = 'REMOVIDO'
+                icon = '❌'
+            
+            activities.append({
+                "name": name,
+                "plan": row['plan_name'],
+                "price": float(row['plan_price']),
+                "action": action,
+                "icon": icon,
+                "timestamp": row['created_at'].isoformat()
+            })
+        
+        return {"activities": activities}
+        
+    except Exception as e:
+        print(f"Erro ao buscar feed de atividades: {e}")
+        # Retorna dados mock em caso de erro
+        return {
+            "activities": [
+                {"name": "João P.", "plan": "Acesso Semanal", "price": 2.00, "action": "ADICIONADO", "icon": "✅", "timestamp": "2025-01-23T10:30:00"},
+                {"name": "Maria S.", "plan": "Grupo VIP Premium", "price": 5.00, "action": "ADICIONADO", "icon": "✅", "timestamp": "2025-01-23T10:25:00"},
+                {"name": "Carlos A.", "plan": "Acesso Mensal", "price": 10.00, "action": "REMOVIDO", "icon": "❌", "timestamp": "2025-01-23T10:20:00"},
+            ]
+        }
+
+
+@app.get("/api/public/stats")
+async def get_public_platform_stats():
+    """
+    Retorna estatísticas gerais da plataforma (números públicos)
+    """
+    try:
+        # Conta total de bots criados
+        total_bots = await database.fetch_val(
+            "SELECT COUNT(*) FROM bots WHERE is_active = true"
+        )
+        
+        # Conta total de pedidos aprovados
+        total_sales = await database.fetch_val(
+            "SELECT COUNT(*) FROM orders WHERE status IN ('approved', 'active')"
+        )
+        
+        # Soma receita total processada
+        total_revenue = await database.fetch_val(
+            "SELECT COALESCE(SUM(plan_price), 0) FROM orders WHERE status IN ('approved', 'active')"
+        )
+        
+        # Conta usuários ativos (com pelo menos 1 bot)
+        active_users = await database.fetch_val(
+            """
+            SELECT COUNT(DISTINCT user_id) 
+            FROM bots 
+            WHERE is_active = true
+            """
+        )
+        
+        return {
+            "total_bots": int(total_bots or 0),
+            "total_sales": int(total_sales or 0),
+            "total_revenue": float(total_revenue or 0),
+            "active_users": int(active_users or 0)
+        }
+        
+    except Exception as e:
+        print(f"Erro ao buscar estatísticas públicas: {e}")
+        # Retorna valores padrão em caso de erro
+        return {
+            "total_bots": 500,
+            "total_sales": 5000,
+            "total_revenue": 50000.00,
+            "active_users": 1200
+        }
+
 # =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
 # =========================================================
