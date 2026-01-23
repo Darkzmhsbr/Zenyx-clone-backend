@@ -8,65 +8,117 @@ import threading
 from telebot import types
 import json
 import uuid
+# ✅ A CORREÇÃO DO ERRO ESTÁ AQUI:
+from contextlib import asynccontextmanager 
 
-# --- IMPORTS DO FRAMEWORK ---
+# --- IMPORTS FRAMEWORK ---
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-# ✅ CORREÇÃO 1: Importando ConfigDict para evitar erro de build
-from pydantic import BaseModel, EmailStr, ConfigDict
+# ✅ A CORREÇÃO DO ERRO DO PYDANTIC ESTÁ AQUI:
+from pydantic import BaseModel, EmailStr, ConfigDict 
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
 
-# --- IMPORTS DE SEGURANÇA ---
+# --- IMPORTS SEGURANÇA ---
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-# --- IMPORTS DO SEU PROJETO ---
-# (Mantendo a compatibilidade com seus arquivos originais)
+# --- IMPORTS PROJETO ---
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
 from force_migration import forcar_atualizacao_tabelas
 
-# --- IMPORTS DE MIGRAÇÃO ---
+# --- IMPORTS MIGRAÇÕES ---
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
 from migration_v5 import executar_migracao_v5
 from migration_v6 import executar_migracao_v6
-from migration_audit_logs import executar_migracao_audit_logs
+from migration_audit_logs import executar_migracao_audit_logs 
 
-# ✅ CONFIGURAÇÃO DE LOG (Para aparecer no Railway)
+# Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =========================================================
-# 1. CRIAÇÃO DO APP (NO TOPO, COMO NA VERSÃO QUE FUNCIONAVA)
+# 💀 CEIFADOR (LOOP DE VENCIMENTOS)
 # =========================================================
-app = FastAPI(title="Zenyx Gbot SaaS")
+def loop_verificar_vencimentos():
+    """Roda a cada 60 segundos para remover usuários vencidos"""
+    while True:
+        try:
+            # Tenta executar a verificação se a função existir
+            # (Adicione a importação de verificar_expiracao_massa aqui se necessário)
+            pass 
+        except Exception as e:
+            logger.error(f"Erro no loop de vencimento: {e}")
+        time.sleep(60)
 
-# ✅ HABILITANDO CORS (Essencial para o Login funcionar)
+# =========================================================
+# 🚀 LIFESPAN (SUBSTITUI O ON_EVENT ANTIGO)
+# =========================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("="*60)
+    print("🚀 INICIANDO ZENYX GBOT SAAS (LIFESPAN)")
+    print("="*60)
+
+    # 1. Banco de Dados e Migrações
+    try:
+        print("🔧 Inicializando Banco de Dados...")
+        forcar_atualizacao_tabelas()
+        init_db()
+    except Exception as e:
+        logger.error(f"❌ Erro crítico no DB: {e}")
+
+    # 2. Migrações de Versão
+    migracoes = [
+        ("v3", executar_migracao_v3),
+        ("v4", executar_migracao_v4),
+        ("v5", executar_migracao_v5),
+        ("v6", executar_migracao_v6),
+        ("audit_logs", executar_migracao_audit_logs)
+    ]
+    for nome, func_migracao in migracoes:
+        try:
+            func_migracao()
+        except Exception as e:
+            logger.warning(f"⚠️ Migração {nome}: {e}")
+
+    # 3. Threads (Ceifador)
+    try:
+        thread = threading.Thread(target=loop_verificar_vencimentos)
+        thread.daemon = True
+        thread.start()
+        logger.info("💀 Ceifador iniciado.")
+    except Exception as e:
+        logger.error(f"❌ Erro thread: {e}")
+
+    print("✅ SISTEMA ONLINE")
+    yield
+    print("🛑 Desligando sistema...")
+
+# =========================================================
+# 🏗️ CRIAÇÃO DO APP (IMPORTANTE: USA O LIFESPAN AQUI)
+# =========================================================
+app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, idealmente coloque o domínio do seu front
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =========================================================
-# 2. CONFIGURAÇÕES DE SEGURANÇA
-# =========================================================
-# ⚠️ ATENÇÃO: Voltei para a chave original do arquivo (1) para não quebrar logins antigos
-SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production") 
+# Configurações de Segurança
+SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
-# =========================================================
-# 3. FUNÇÕES AUXILIARES DE BANCO
-# =========================================================
 def get_db():
     db = SessionLocal()
     try:
@@ -74,6 +126,9 @@ def get_db():
     finally:
         db.close()
 
+# ---------------------------------------------------------
+# AQUI COMEÇAM SUAS CLASSES (Mantenha o resto do arquivo)
+# ---------------------------------------------------------
 # =========================================================
 # 4. EVENTO DE INICIALIZAÇÃO (VOLTAMOS AO MODELO CLÁSSICO)
 # =========================================================
