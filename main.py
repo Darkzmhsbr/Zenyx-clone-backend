@@ -129,6 +129,251 @@ def get_db():
     finally:
         db.close()
 
+# =========================================================
+# 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
+# =========================================================
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    full_name: str = None
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+# 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
+class PlatformUserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    pushin_pay_id: Optional[str] = None # ID da conta para Split
+    taxa_venda: Optional[int] = None    # Taxa fixa em centavos
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class User(BaseModel):
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    disabled: Optional[bool] = None
+
+class UserInDB(User):
+    hashed_password: str
+
+# =========================================================
+# 📦 SCHEMAS PYDANTIC PARA SUPER ADMIN (🆕 FASE 3.4)
+# =========================================================
+class UserStatusUpdate(BaseModel):
+    is_active: bool
+
+class UserPromote(BaseModel):
+    is_superuser: bool
+
+class UserDetailsResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: str = None
+    is_active: bool
+    is_superuser: bool
+    created_at: str
+    total_bots: int
+    total_revenue: float
+    total_sales: int
+
+# =========================================================
+# 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO (CORRIGIDAS)
+# =========================================================
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifica se a senha está correta"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """Gera hash da senha (com truncamento automático para bcrypt)"""
+    # Bcrypt tem limite de 72 bytes
+    if len(password.encode('utf-8')) > 72:
+        password = password[:72]
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    """Cria token JWT"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Decodifica token e retorna usuário atual"""
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Não foi possível validar as credenciais",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        user_id: int = payload.get("user_id")
+        
+        if username is None:
+            raise credentials_exception
+            
+    except JWTError:
+        raise credentials_exception
+    
+    db = SessionLocal()
+    try:
+        from database import User
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if user is None:
+            raise credentials_exception
+        
+        return user
+    finally:
+        db.close()
+
+# =========================================================
+# 👑 MIDDLEWARE: VERIFICAR SE É SUPER-ADMIN (🆕 FASE 3.4)
+# =========================================================
+async def get_current_superuser(current_user = Depends(get_current_user)):
+    """
+    Verifica se o usuário logado é um super-administrador.
+    Retorna o usuário se for super-admin, caso contrário levanta HTTPException 403.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso negado: esta funcionalidade requer privilégios de super-administrador"
+        )
+    
+    logger.info(f"👑 Super-admin acessando: {current_user.username}")
+    return current_user
+
+# =========================================================
+# 🔒 FUNÇÃO HELPER: VERIFICAR PROPRIEDADE DO BOT
+# =========================================================
+def verificar_bot_pertence_usuario(bot_id: int, user_id: int, db: Session):
+    """
+    Verifica se o bot pertence ao usuário.
+    Retorna o bot se pertencer, caso contrário levanta HTTPException 404.
+    """
+    bot = db.query(Bot).filter(
+        Bot.id == bot_id,
+        Bot.owner_id == user_id
+    ).first()
+    
+    if not bot:
+        raise HTTPException(
+            status_code=404, 
+            detail="Bot não encontrado ou você não tem permissão para acessá-lo"
+        )
+    
+    return bot
+
+# =========================================================
+# 🌐 FUNÇÃO HELPER: EXTRAIR IP DO CLIENT (🆕 FASE 3.3)
+# =========================================================
+def get_client_ip(request: Request) -> str:
+    """
+    Extrai o IP real do cliente, considerando proxies (Railway, Vercel, etc)
+    """
+    # Tenta pegar do header X-Forwarded-For (proxies)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        # Pega o primeiro IP da lista (cliente real)
+        return forwarded.split(",")[0].strip()
+    
+    # Tenta pegar do header X-Real-IP
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    
+    # Fallback: IP direto da conexão
+    if request.client:
+        return request.client.host
+    
+    return "unknown"
+
+# =========================================================
+# 📋 FUNÇÃO HELPER: REGISTRAR AÇÃO DE AUDITORIA (🆕 FASE 3.3)
+# =========================================================
+def log_action(
+    db: Session,
+    user_id: int,
+    username: str,
+    action: str,
+    resource_type: str,
+    resource_id: int = None,
+    description: str = None,
+    details: dict = None,
+    success: bool = True,
+    error_message: str = None,
+    ip_address: str = None,
+    user_agent: str = None
+):
+    """
+    Registra uma ação de auditoria no banco de dados
+    
+    Parâmetros:
+    - user_id: ID do usuário que executou a ação
+    - username: Nome do usuário (denormalizado para performance)
+    - action: Tipo de ação (ex: "bot_created", "login_success")
+    - resource_type: Tipo de recurso afetado (ex: "bot", "plano", "auth")
+    - resource_id: ID do recurso (opcional)
+    - description: Descrição legível da ação
+    - details: Dicionário com dados extras (será convertido para JSON)
+    - success: Se a ação foi bem-sucedida
+    - error_message: Mensagem de erro (se houver)
+    - ip_address: IP do cliente
+    - user_agent: Navegador/dispositivo do cliente
+    """
+    try:
+        # Converte details para JSON se for dict
+        details_json = None
+        if details:
+            import json
+            details_json = json.dumps(details, ensure_ascii=False)
+        
+        # Cria o registro de auditoria
+        audit_log = AuditLog(
+            user_id=user_id,
+            username=username,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            description=description,
+            details=details_json,
+            success=success,
+            error_message=error_message,
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+        
+        db.add(audit_log)
+        db.commit()
+        
+        logger.info(f"📋 Audit Log: {username} - {action} - {resource_type}")
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao criar log de auditoria: {e}")
+        # Não propaga o erro para não quebrar a operação principal
+        db.rollback()
+
+# ============================================================
+# 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
+# ============================================================
+
 # ============================================================
 # 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
 # ============================================================
@@ -4688,28 +4933,697 @@ def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
     }
 
 # =========================================================
+# 👑 ROTAS SUPER ADMIN (🆕 FASE 3.4)
+# =========================================================
+
+@app.get("/api/superadmin/stats")
+def get_superadmin_stats(
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    👑 Painel Super Admin - Estatísticas globais do sistema
+    
+    🆕 ADICIONA FATURAMENTO DO SUPER ADMIN (SPLITS)
+    """
+    try:
+        from database import User
+        
+        # ============================================
+        # 📊 ESTATÍSTICAS GERAIS DO SISTEMA
+        # ============================================
+        
+        # Total de usuários
+        total_users = db.query(User).count()
+        active_users = db.query(User).filter(User.is_active == True).count()
+        inactive_users = total_users - active_users
+        
+        # Total de bots
+        total_bots = db.query(Bot).count()
+        active_bots = db.query(Bot).filter(Bot.status == 'ativo').count()
+        inactive_bots = total_bots - active_bots
+        
+        # Receita total do sistema
+        todas_vendas = db.query(Pedido).filter(
+            Pedido.status.in_(['approved', 'paid', 'active'])
+        ).all()
+        
+        total_revenue = sum(int(p.valor * 100) for p in todas_vendas)
+        total_sales = len(todas_vendas)
+        
+        # Ticket médio do sistema
+        avg_ticket = int(total_revenue / total_sales) if total_sales > 0 else 0
+        
+        # ============================================
+        # 💰 FATURAMENTO DO SUPER ADMIN (SPLITS)
+        # ============================================
+        taxa_super_admin = current_superuser.taxa_venda or 60
+        super_admin_revenue = total_sales * taxa_super_admin
+        
+        logger.info(f"👑 Super Admin Revenue: {total_sales} vendas × R$ {taxa_super_admin/100:.2f} = R$ {super_admin_revenue/100:.2f}")
+        
+        # ============================================
+        # 📈 USUÁRIOS RECENTES
+        # ============================================
+        recent_users = db.query(User).order_by(
+            desc(User.created_at)
+        ).limit(5).all()
+        
+        recent_users_data = []
+        for u in recent_users:
+            user_bots = db.query(Bot).filter(Bot.owner_id == u.id).count()
+            user_sales = db.query(Pedido).filter(
+                Pedido.bot_id.in_([b.id for b in u.bots]),
+                Pedido.status.in_(['approved', 'paid'])
+            ).count()
+            
+            recent_users_data.append({
+                "id": u.id,
+                "username": u.username,
+                "email": u.email,
+                "total_bots": user_bots,
+                "total_sales": user_sales,
+                "created_at": u.created_at.isoformat() if u.created_at else None
+            })
+        
+        # ============================================
+        # 📅 NOVOS USUÁRIOS (30 DIAS)
+        # ============================================
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        new_users_count = db.query(User).filter(
+            User.created_at >= thirty_days_ago
+        ).count()
+        
+        # Cálculo de crescimento
+        if total_users > 0:
+            growth_percentage = round((new_users_count / total_users) * 100, 2)
+        else:
+            growth_percentage = 0
+        
+        return {
+            # Sistema
+            "total_users": total_users,
+            "active_users": active_users,
+            "inactive_users": inactive_users,
+            "total_bots": total_bots,
+            "active_bots": active_bots,
+            "inactive_bots": inactive_bots,
+            
+            # Financeiro (Sistema)
+            "total_revenue": total_revenue,  # centavos
+            "total_sales": total_sales,
+            "avg_ticket": avg_ticket,  # centavos
+            
+            # 🆕 Financeiro (Super Admin)
+            "super_admin_revenue": super_admin_revenue,  # centavos
+            "super_admin_sales": total_sales,
+            "super_admin_rate": taxa_super_admin,  # centavos
+            
+            # Crescimento
+            "new_users_30d": new_users_count,
+            "growth_percentage": growth_percentage,
+            
+            # Dados extras
+            "recent_users": recent_users_data
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar stats super admin: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao buscar estatísticas")
+
+@app.get("/api/superadmin/users")
+def list_all_users(
+    page: int = 1,
+    per_page: int = 50,
+    search: str = None,
+    status: str = None,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Lista todos os usuários do sistema (apenas super-admin)
+    
+    Filtros:
+    - search: Busca por username, email ou nome completo
+    - status: "active" ou "inactive"
+    - page: Página atual (padrão: 1)
+    - per_page: Usuários por página (padrão: 50, máx: 100)
+    """
+    try:
+        from database import User
+        
+        # Limita per_page a 100
+        if per_page > 100:
+            per_page = 100
+        
+        # Query base
+        query = db.query(User)
+        
+        # Filtro de busca
+        if search:
+            search_filter = f"%{search}%"
+            query = query.filter(
+                (User.username.ilike(search_filter)) |
+                (User.email.ilike(search_filter)) |
+                (User.full_name.ilike(search_filter))
+            )
+        
+        # Filtro de status
+        if status == "active":
+            query = query.filter(User.is_active == True)
+        elif status == "inactive":
+            query = query.filter(User.is_active == False)
+        
+        # Total de registros
+        total = query.count()
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        users = query.order_by(User.created_at.desc()).offset(offset).limit(per_page).all()
+        
+        # Formata resposta com estatísticas de cada usuário
+        users_data = []
+        for user in users:
+            # Busca bots do usuário
+            user_bots = db.query(Bot).filter(Bot.owner_id == user.id).all()
+            bot_ids = [b.id for b in user_bots]
+            
+            # Calcula receita e vendas
+            user_revenue = 0.0
+            user_sales = 0
+            
+            if bot_ids:
+                user_revenue = db.query(func.sum(Pedido.valor)).filter(
+                    Pedido.bot_id.in_(bot_ids),
+                    Pedido.status == 'approved'
+                ).scalar() or 0.0
+                
+                user_sales = db.query(Pedido).filter(
+                    Pedido.bot_id.in_(bot_ids),
+                    Pedido.status == 'approved'
+                ).count()
+            
+            users_data.append({
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_active": user.is_active,
+                "is_superuser": user.is_superuser,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "total_bots": len(user_bots),
+                "total_revenue": float(user_revenue),
+                "total_sales": user_sales
+            })
+        
+        return {
+            "data": users_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao listar usuários: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao listar usuários")
+
+@app.get("/api/superadmin/users/{user_id}")
+def get_user_details(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Retorna detalhes completos de um usuário específico (apenas super-admin)
+    
+    Inclui:
+    - Dados básicos do usuário
+    - Lista de bots do usuário
+    - Estatísticas de receita e vendas
+    - Últimas ações de auditoria
+    """
+    try:
+        from database import User
+        
+        # Busca o usuário
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+        # Busca bots do usuário
+        user_bots = db.query(Bot).filter(Bot.owner_id == user.id).all()
+        bot_ids = [b.id for b in user_bots]
+        
+        # Calcula estatísticas
+        user_revenue = 0.0
+        user_sales = 0
+        total_leads = 0
+        
+        if bot_ids:
+            user_revenue = db.query(func.sum(Pedido.valor)).filter(
+                Pedido.bot_id.in_(bot_ids),
+                Pedido.status == 'approved'
+            ).scalar() or 0.0
+            
+            user_sales = db.query(Pedido).filter(
+                Pedido.bot_id.in_(bot_ids),
+                Pedido.status == 'approved'
+            ).count()
+            
+            total_leads = db.query(Lead).filter(Lead.bot_id.in_(bot_ids)).count()
+        
+        # Últimas ações de auditoria (últimas 10)
+        recent_logs = db.query(AuditLog).filter(
+            AuditLog.user_id == user_id
+        ).order_by(AuditLog.created_at.desc()).limit(10).all()
+        
+        logs_data = []
+        for log in recent_logs:
+            logs_data.append({
+                "id": log.id,
+                "action": log.action,
+                "resource_type": log.resource_type,
+                "description": log.description,
+                "success": log.success,
+                "created_at": log.created_at.isoformat() if log.created_at else None
+            })
+        
+        # Formata dados dos bots
+        bots_data = []
+        for bot in user_bots:
+            bot_revenue = db.query(func.sum(Pedido.valor)).filter(
+                Pedido.bot_id == bot.id,
+                Pedido.status == 'approved'
+            ).scalar() or 0.0
+            
+            bot_sales = db.query(Pedido).filter(
+                Pedido.bot_id == bot.id,
+                Pedido.status == 'approved'
+            ).count()
+            
+            bots_data.append({
+                "id": bot.id,
+                "nome": bot.nome,
+                "username": bot.username,
+                "status": bot.status,
+                "created_at": bot.created_at.isoformat() if bot.created_at else None,
+                "revenue": float(bot_revenue),
+                "sales": bot_sales
+            })
+        
+        return {
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_active": user.is_active,
+                "is_superuser": user.is_superuser,
+                "created_at": user.created_at.isoformat() if user.created_at else None
+            },
+            "stats": {
+                "total_bots": len(user_bots),
+                "total_revenue": float(user_revenue),
+                "total_sales": user_sales,
+                "total_leads": total_leads
+            },
+            "bots": bots_data,
+            "recent_activity": logs_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao buscar detalhes do usuário: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao buscar detalhes")
+
+@app.put("/api/superadmin/users/{user_id}/status")
+def update_user_status(
+    user_id: int,
+    status_data: UserStatusUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Ativa ou desativa um usuário (apenas super-admin)
+    
+    Quando um usuário é desativado:
+    - Não pode fazer login
+    - Seus bots permanecem no sistema
+    - Pode ser reativado posteriormente
+    """
+    try:
+        from database import User
+        
+        # Busca o usuário
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+        # Não permite desativar a si mesmo
+        if user.id == current_superuser.id:
+            raise HTTPException(
+                status_code=400, 
+                detail="Você não pode desativar sua própria conta"
+            )
+        
+        # Guarda status antigo
+        old_status = user.is_active
+        
+        # Atualiza status
+        user.is_active = status_data.is_active
+        db.commit()
+        
+        # 📋 AUDITORIA: Mudança de status
+        action = "user_activated" if status_data.is_active else "user_deactivated"
+        description = f"{'Ativou' if status_data.is_active else 'Desativou'} usuário '{user.username}'"
+        
+        log_action(
+            db=db,
+            user_id=current_superuser.id,
+            username=current_superuser.username,
+            action=action,
+            resource_type="user",
+            resource_id=user.id,
+            description=description,
+            details={
+                "target_user": user.username,
+                "old_status": old_status,
+                "new_status": status_data.is_active
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
+        logger.info(f"👑 Super-admin {current_superuser.username} {'ativou' if status_data.is_active else 'desativou'} usuário {user.username}")
+        
+        return {
+            "status": "success",
+            "message": f"Usuário {'ativado' if status_data.is_active else 'desativado'} com sucesso",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "is_active": user.is_active
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao atualizar status do usuário: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao atualizar status")
+
+# 👇 COLE ISSO NA SEÇÃO DE ROTAS DO SUPER ADMIN
+
+# 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
+# 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
+# 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
+@app.put("/api/superadmin/users/{user_id}")
+def update_user_financials(
+    user_id: int, 
+    user_data: PlatformUserUpdate, 
+    current_user = Depends(get_current_superuser), # Já corrigimos o nome aqui antes
+    db: Session = Depends(get_db)
+):
+    # 👇 A CORREÇÃO MÁGICA ESTÁ AQUI TAMBÉM:
+    from database import User
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+    if user_data.full_name:
+        user.full_name = user_data.full_name
+    if user_data.email:
+        user.email = user_data.email
+    if user_data.pushin_pay_id is not None:
+        user.pushin_pay_id = user_data.pushin_pay_id
+    # 👑 Só o Admin pode mudar a taxa que o membro paga
+    if user_data.taxa_venda is not None:
+        user.taxa_venda = user_data.taxa_venda
+        
+    db.commit()
+    return {"status": "success", "message": "Dados financeiros do usuário atualizados"}
+
+@app.delete("/api/superadmin/users/{user_id}")
+def delete_user(
+    user_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Deleta um usuário e todos os seus dados (apenas super-admin)
+    
+    ⚠️ ATENÇÃO: Esta ação é IRREVERSÍVEL!
+    
+    O que é deletado:
+    - Usuário
+    - Todos os bots do usuário (CASCADE)
+    - Todos os planos dos bots
+    - Todos os pedidos dos bots
+    - Todos os leads dos bots
+    - Todos os logs de auditoria do usuário
+    """
+    try:
+        from database import User
+        
+        # Busca o usuário
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+        # Não permite deletar a si mesmo
+        if user.id == current_superuser.id:
+            raise HTTPException(
+                status_code=400, 
+                detail="Você não pode deletar sua própria conta"
+            )
+        
+        # Não permite deletar outro super-admin
+        if user.is_superuser:
+            raise HTTPException(
+                status_code=400, 
+                detail="Não é possível deletar outro super-administrador"
+            )
+        
+        # Guarda informações para o log
+        username = user.username
+        email = user.email
+        total_bots = db.query(Bot).filter(Bot.owner_id == user.id).count()
+        
+        # Deleta o usuário (CASCADE vai deletar todos os relacionamentos)
+        db.delete(user)
+        db.commit()
+        
+        # 📋 AUDITORIA: Deleção de usuário
+        log_action(
+            db=db,
+            user_id=current_superuser.id,
+            username=current_superuser.username,
+            action="user_deleted",
+            resource_type="user",
+            resource_id=user_id,
+            description=f"Deletou usuário '{username}' e todos os seus dados",
+            details={
+                "deleted_user": username,
+                "deleted_email": email,
+                "total_bots_deleted": total_bots
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
+        logger.warning(f"👑 Super-admin {current_superuser.username} DELETOU usuário {username} (ID: {user_id})")
+        
+        return {
+            "status": "success",
+            "message": f"Usuário '{username}' e todos os seus dados foram deletados",
+            "deleted": {
+                "username": username,
+                "email": email,
+                "total_bots": total_bots
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao deletar usuário: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao deletar usuário")
+
+@app.put("/api/superadmin/users/{user_id}/promote")
+def promote_user_to_superadmin(
+    user_id: int,
+    promote_data: UserPromote,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Promove ou rebaixa um usuário de/para super-admin (apenas super-admin)
+    
+    ⚠️ CUIDADO: Super-admins têm acesso total ao sistema
+    """
+    try:
+        from database import User
+        
+        # Busca o usuário
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+        # Não permite alterar o próprio status
+        if user.id == current_superuser.id:
+            raise HTTPException(
+                status_code=400, 
+                detail="Você não pode alterar seu próprio status de super-admin"
+            )
+        
+        # Guarda status antigo
+        old_status = user.is_superuser
+        
+        # Atualiza status de super-admin
+        user.is_superuser = promote_data.is_superuser
+        db.commit()
+        
+        # 📋 AUDITORIA: Promoção/Rebaixamento
+        action = "user_promoted_superadmin" if promote_data.is_superuser else "user_demoted_superadmin"
+        description = f"{'Promoveu' if promote_data.is_superuser else 'Rebaixou'} usuário '{user.username}' {'para' if promote_data.is_superuser else 'de'} super-admin"
+        
+        log_action(
+            db=db,
+            user_id=current_superuser.id,
+            username=current_superuser.username,
+            action=action,
+            resource_type="user",
+            resource_id=user.id,
+            description=description,
+            details={
+                "target_user": user.username,
+                "old_superuser_status": old_status,
+                "new_superuser_status": promote_data.is_superuser
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
+        logger.warning(f"👑 Super-admin {current_superuser.username} {'PROMOVEU' if promote_data.is_superuser else 'REBAIXOU'} usuário {user.username}")
+        
+        return {
+            "status": "success",
+            "message": f"Usuário {'promovido a' if promote_data.is_superuser else 'rebaixado de'} super-admin com sucesso",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "is_superuser": user.is_superuser
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao promover/rebaixar usuário: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao alterar status de super-admin")
+
+# =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
 # =========================================================
 @app.on_event("startup")
 def on_startup():
-    print("Starting Container - Zenyx")
+    print("="*60)
+    print("🚀 INICIANDO ZENYX GBOT SAAS")
+    print("="*60)
     
     # 1. Cria tabelas básicas se não existirem
     try:
+        print("📊 Inicializando banco de dados...")
         init_db()
+        print("✅ Banco de dados inicializado")
     except Exception as e:
-        logger.error(f"Erro no init_db: {e}")
-
-    # 2. Migrações (COMENTADAS PARA NÃO RODAR TODA HORA)
-    # Descomente apenas se criar uma tabela nova no futuro
-    # try:
-    #     executar_migracao_v3()
-    #     executar_migracao_v4()
-    #     executar_migracao_v5()
-    #     executar_migracao_v6()
-    # except: pass
+        logger.error(f"❌ ERRO CRÍTICO no init_db: {e}")
+        import traceback
+        traceback.print_exc()
+        # NÃO pare a aplicação aqui, continue tentando
     
-    logger.info("✅ Sistema Iniciado e Pronto!")
+    # 2. Executa migrações existentes (COM FALLBACK)
+    try:
+        print("🔄 Executando migrações...")
+        
+        # Tenta cada migração individualmente
+        try:
+            executar_migracao_v3()
+            print("✅ Migração v3 OK")
+        except Exception as e:
+            logger.warning(f"⚠️ Migração v3 falhou: {e}")
+        
+        try:
+            executar_migracao_v4()
+            print("✅ Migração v4 OK")
+        except Exception as e:
+            logger.warning(f"⚠️ Migração v4 falhou: {e}")
+        
+        try:
+            executar_migracao_v5()
+            print("✅ Migração v5 OK")
+        except Exception as e:
+            logger.warning(f"⚠️ Migração v5 falhou: {e}")
+        
+        try:
+            executar_migracao_v6()
+            print("✅ Migração v6 OK")
+        except Exception as e:
+            logger.warning(f"⚠️ Migração v6 falhou: {e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Erro geral nas migrações: {e}")
+    
+    # 3. Executa migração de Audit Logs (COM FALLBACK)
+    try:
+        print("📋 Configurando Audit Logs...")
+        from migration_audit_logs import executar_migracao_audit_logs
+        executar_migracao_audit_logs()
+        print("✅ Audit Logs configurado")
+    except ImportError:
+        logger.warning("⚠️ Arquivo migration_audit_logs.py não encontrado")
+    except Exception as e:
+        logger.error(f"⚠️ Erro na migração Audit Logs: {e}")
+    
+    # 4. Configura pushin_pay_id (COM FALLBACK ROBUSTO)
+    try:
+        print("💳 Configurando sistema de pagamento...")
+        db = SessionLocal()
+        try:
+            config = db.query(SystemConfig).filter(
+                SystemConfig.key == "pushin_plataforma_id"
+            ).first()
+            
+            if not config:
+                config = SystemConfig(
+                    key="pushin_plataforma_id",
+                    value=""
+                )
+                db.add(config)
+                db.commit()
+                print("✅ Configuração de pagamento criada")
+            else:
+                print("✅ Configuração de pagamento encontrada")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao configurar pushin_pay_id: {e}")
+    
+    print("="*60)
+    print("✅ SISTEMA INICIADO E PRONTO!")
+    print("="*60)
+
 
 @app.get("/")
 def home():
