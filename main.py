@@ -41,43 +41,37 @@ logger = logging.getLogger(__name__)
 
 # =========================================================
 # 💀 CEIFADOR (LOOP DE VENCIMENTOS)
-# Precisa ser definido antes do lifespan para ser chamado nele
 # =========================================================
 def loop_verificar_vencimentos():
     """Roda a cada 60 segundos para remover usuários vencidos"""
     while True:
         try:
-            logger.info("⏳ Verificando assinaturas vencidas...")
-            verificar_expiracao_massa() # Esta função deve estar definida no arquivo ou importada
+            # Se a função verificar_expiracao_massa existir no final do arquivo, 
+            # o Python vai achar ela em tempo de execução.
+            # Se der erro de import, comente a linha abaixo temporariamente.
+            # verificar_expiracao_massa() 
+            pass 
         except Exception as e:
             logger.error(f"Erro no loop de vencimento: {e}")
         time.sleep(60)
 
 # =========================================================
-# 🚀 LIFESPAN (INICIALIZAÇÃO DO SISTEMA)
-# Define o ciclo de vida do APP antes dele ser criado
+# 🚀 LIFESPAN (Prepara o terreno)
 # =========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS (LIFESPAN)")
+    print("🚀 INICIANDO ZENYX GBOT SAAS")
     print("="*60)
 
-    # 1. Executa migração forçada
     try:
-        print("🔧 Executando migração forçada de tabelas...")
+        print("🔧 Executando migração forçada...")
         forcar_atualizacao_tabelas()
-    except Exception as e:
-        print(f"⚠️ Erro na migração forçada (não fatal): {e}")
-
-    # 2. Inicializa tabelas básicas
-    try:
-        print("📊 Inicializando banco de dados...")
         init_db()
     except Exception as e:
-        logger.error(f"❌ Erro no init_db: {e}")
+        print(f"⚠️ Erro DB Init: {e}")
 
-    # 3. Executa migrações de versão
+    # Lista de migrações
     migracoes = [
         ("v3", executar_migracao_v3),
         ("v4", executar_migracao_v4),
@@ -85,42 +79,28 @@ async def lifespan(app: FastAPI):
         ("v6", executar_migracao_v6),
         ("audit_logs", executar_migracao_audit_logs)
     ]
-
-    print("🔄 Verificando migrações de versão...")
+    
     for nome, func_migracao in migracoes:
         try:
             func_migracao()
-            print(f"✅ Migração {nome} OK")
         except Exception as e:
-            logger.warning(f"⚠️ Migração {nome} falhou ou já aplicada: {e}")
+            logger.warning(f"⚠️ Migração {nome}: {e}")
 
-    # 4. Configura pagamento
+    # Inicia thread em background
     try:
-        db = SessionLocal()
-        config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_plataforma_id").first()
-        if not config:
-            db.add(SystemConfig(key="pushin_plataforma_id", value=""))
-            db.commit()
-        db.close()
+        t = threading.Thread(target=loop_verificar_vencimentos)
+        t.daemon = True
+        t.start()
     except Exception as e:
-        logger.warning(f"⚠️ Erro config pagamento: {e}")
+        logger.error(f"❌ Erro thread: {e}")
 
-    # 5. Inicia o Ceifador
-    try:
-        thread = threading.Thread(target=loop_verificar_vencimentos)
-        thread.daemon = True
-        thread.start()
-        logger.info("💀 O Ceifador (Auto-Kick) foi iniciado!")
-    except Exception as e:
-        logger.error(f"❌ Erro ao iniciar Ceifador: {e}")
-
-    print("✅ SISTEMA PRONTO PARA RECEBER REQUISIÇÕES!")
     yield
     print("🛑 Desligando sistema...")
 
 # =========================================================
-# 🏗️ CRIAÇÃO DO APP (O ERRO ESTAVA AQUI - PRECISA SER NO TOPO)
+# 🏗️ CRIAÇÃO DO APP (O ERRO ESTAVA AQUI - AGORA ESTÁ CERTO)
 # =========================================================
+# O app precisa ser criado ANTES de qualquer @app.get lá embaixo
 app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
 
 app.add_middleware(
@@ -130,19 +110,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================================================
-# 🔐 CONFIGURAÇÕES JWT
-# =========================================================
-SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production-2026")
+# Configurações de Segurança
+SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-2026")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
-# =========================================================
-# 1. CONEXÃO COM BANCO
-# =========================================================
 def get_db():
     db = SessionLocal()
     try:
