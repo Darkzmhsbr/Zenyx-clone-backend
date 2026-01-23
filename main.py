@@ -31,7 +31,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -207,7 +207,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     
     db = SessionLocal()
     try:
-        from database import User
         from sqlalchemy.orm import joinedload
         
         # 🔥 EAGER LOADING para carregar bots ANTES de fechar sessão
