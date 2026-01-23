@@ -5874,11 +5874,14 @@ def promote_user_to_superadmin(
 # =========================================================
 # 🔔 ROTAS DE NOTIFICAÇÕES
 # =========================================================
+# =========================================================
+# 🔔 ROTAS DE NOTIFICAÇÕES (CORRIGIDO)
+# =========================================================
 @app.get("/api/notifications")
 def get_notifications(
     limit: int = 20, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user = Depends(get_current_user) # <--- CORRIGIDO AQUI
 ):
     """Retorna as notificações do usuário logado"""
     notifs = db.query(Notification).filter(
@@ -5899,7 +5902,7 @@ def get_notifications(
 @app.put("/api/notifications/read-all")
 def mark_all_read(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user = Depends(get_current_user) # <--- CORRIGIDO AQUI
 ):
     """Marca todas como lidas"""
     db.query(Notification).filter(
@@ -5914,7 +5917,7 @@ def mark_all_read(
 def mark_one_read(
     notif_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user = Depends(get_current_user) # <--- CORRIGIDO AQUI
 ):
     """Marca uma específica como lida"""
     notif = db.query(Notification).filter(
