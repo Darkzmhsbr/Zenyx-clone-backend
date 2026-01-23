@@ -106,9 +106,10 @@ app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],  # Permite qualquer origem
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite qualquer método (POST, GET, OPTIONS)
+    allow_headers=["*"],  # Permite qualquer cabeçalho
 )
 
 # Configurações de Segurança
