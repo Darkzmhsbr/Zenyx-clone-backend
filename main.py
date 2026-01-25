@@ -2968,10 +2968,7 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
 # 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL BLINDADA
 # =========================================================
 # =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL COM NOTIFICAÇÕES
-# =========================================================
-# =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL ÚNICA
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO BLINDADA + CORREÇÃO DE THREAD
 # =========================================================
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
@@ -2981,11 +2978,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
         
-        # Tratamento de JSON ou Form Data
         try:
             data = json.loads(body_str)
-            if isinstance(data, list):
-                data = data[0]
+            if isinstance(data, list): data = data[0]
         except:
             try:
                 parsed = urllib.parse.parse_qs(body_str)
@@ -2994,14 +2989,12 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 logger.error(f"❌ Não foi possível ler o corpo do webhook: {body_str}")
                 return {"status": "ignored"}
 
-        # 2. EXTRAÇÃO E NORMALIZAÇÃO DO ID
+        # 2. EXTRAÇÃO E NORMALIZAÇÃO
         raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
-        
-        # Status
         status_pix = str(data.get("status", "")).lower()
         
-        # 🔥 FILTRO: SÓ PASSA SE FOR PAGO
+        # Filtro de Status
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
 
@@ -3009,17 +3002,16 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
 
         if not pedido:
-            print(f"❌ Pedido {tx_id} não encontrado no banco.")
+            print(f"❌ Pedido {tx_id} não encontrado.")
             return {"status": "ok", "msg": "Order not found"}
 
-        if pedido.status == "approved" or pedido.status == "paid":
+        if pedido.status in ["approved", "paid"]:
             return {"status": "ok", "msg": "Already paid"}
 
-        # --- 4. CÁLCULO DA DATA DE EXPIRAÇÃO ---
+        # 4. CÁLCULO DA DATA DE EXPIRAÇÃO
         now = datetime.utcnow()
         data_validade = None 
         
-        # A) Pelo ID do plano
         if pedido.plano_id:
             pid = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
             if pid:
@@ -3027,12 +3019,11 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 if plano_db and plano_db.dias_duracao and plano_db.dias_duracao < 90000:
                     data_validade = now + timedelta(days=plano_db.dias_duracao)
 
-        # B) Fallback pelo nome
         if not data_validade and pedido.plano_nome:
             nm = pedido.plano_nome.lower()
             if "vital" not in nm and "mega" not in nm and "eterno" not in nm:
-                dias = 30 # Padrão
-                if "24" in nm or "diario" in nm or "1 dia" in nm: dias = 1
+                dias = 30
+                if "24" in nm or "diario" in nm: dias = 1
                 elif "semanal" in nm: dias = 7
                 elif "trimestral" in nm: dias = 90
                 elif "anual" in nm: dias = 365
@@ -3043,126 +3034,120 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.data_aprovacao = now
         pedido.data_expiracao = data_validade     
         pedido.custom_expiration = data_validade
-        pedido.mensagem_enviada = True
-        
-        # 🔥 Atualiza Funil
+        pedido.mensagem_enviada = False # Força tentar enviar agora
         pedido.status_funil = 'fundo'
         pedido.pagou_em = now
         
-        # 🔥 ATUALIZA TRACKING
+        db.commit()
+        
+        # Atualiza Tracking
         if pedido.tracking_id:
             try:
                 t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
                 if t_link:
                     t_link.vendas += 1
                     t_link.faturamento += pedido.valor
-                    logger.info(f"📈 Tracking atualizado: {t_link.nome} (+R$ {pedido.valor})")
-            except Exception as e_track:
-                logger.error(f"Erro ao atualizar tracking: {e_track}")
-
-        db.commit()
+                    db.commit()
+            except: pass
 
         texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
-        logger.info(f"✅ Pagamento aprovado! Pedido: {tx_id}")
+        print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
         
-        # 6. BUSCA O BOT
-        bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
-        
-        if not bot_data:
-            logger.error(f"❌ Bot {pedido.bot_id} não encontrado!")
-            return {"status": "ok", "msg": "Bot not found"}
-        
-        # --- A) ENTREGA PRODUTO PRINCIPAL ---
+        # ======================================================================
+        # 6. ENTREGA (COM A CORREÇÃO DE THREAD E ID)
+        # ======================================================================
         try:
-            tb = telebot.TeleBot(bot_data.token)
-            
-            # Tratamento do ID do Canal
-            raw_cid = str(bot_data.id_canal_vip).strip()
-            canal_id = int(raw_cid) if raw_cid.lstrip('-').isdigit() else raw_cid
-
-            # 1. Tenta desbanir antes
-            try: 
-                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
-            except: 
-                pass
-
-            # 2. Gera Link Único
-            link_acesso = None
-            try:
-                convite = tb.create_chat_invite_link(
-                    chat_id=canal_id, 
-                    member_limit=1, 
-                    name=f"Venda {pedido.first_name}"
-                )
-                link_acesso = convite.invite_link
-            except Exception as e_link:
-                logger.warning(f"Erro ao gerar link único: {e_link}")
-                link_acesso = pedido.link_acesso 
-
-            # 3. Envia Mensagem ao Cliente
-            if link_acesso:
-                msg_cliente = (
-                    f"✅ <b>Pagamento Confirmado!</b>\n\n"
-                    f"🎉 Parabéns! Seu acesso foi liberado.\n"
-                    f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                    f"👇 <b>Toque no link para entrar:</b>\n"
-                    f"👉 {link_acesso}\n\n"
-                    f"<i>Este link é exclusivo para você.</i>"
-                )
-                tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
-                logger.info(f"✅ Cliente notificado: {pedido.telegram_id}")
-            else:
-                tb.send_message(
-                    int(pedido.telegram_id), 
-                    f"✅ <b>Pagamento Confirmado!</b>\nTente entrar no canal agora ou digite /start.", 
-                    parse_mode="HTML"
-                )
-
-        except Exception as e_entrega:
-            logger.error(f"❌ Erro na entrega principal: {e_entrega}")
-
-        # --- B) ENTREGA DO ORDER BUMP ---
-        if pedido.tem_order_bump:
-            logger.info(f"🎁 Entregando Order Bump...")
-            try:
-                bump_config = db.query(OrderBumpConfig).filter(
-                    OrderBumpConfig.bot_id == bot_data.id
-                ).first()
+            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+            if bot_data:
+                # 🔥 FIX 1: threaded=False (Essencial para não falhar o envio)
+                tb = telebot.TeleBot(bot_data.token, threaded=False)
                 
-                if bump_config and bump_config.link_acesso:
-                    msg_bump = (
-                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
-                        f"Você também garantiu acesso ao:\n"
-                        f"👉 <b>{bump_config.nome_produto}</b>\n\n"
-                        f"🔗 <b>Acesse seu conteúdo extra abaixo:</b>\n"
-                        f"{bump_config.link_acesso}"
-                    )
-                    tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
-                    
-            except Exception as e_bump:
-                logger.error(f"❌ Erro ao entregar Order Bump: {e_bump}")
+                target_id = str(pedido.telegram_id).strip()
 
-        # --- C) NOTIFICAÇÃO AO ADMIN ---
-        logger.info(f"📢 Enviando notificação de venda...")
-        
-        msg_admin = (
-            f"💰 <b>VENDA REALIZADA!</b>\n\n"
-            f"🤖 Bot: <b>{bot_data.nome}</b>\n"
-            f"👤 Cliente: {pedido.first_name} (@{pedido.username or 'sem username'})\n"
-            f"📦 Plano: {pedido.plano_nome}\n"
-            f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
-            f"📅 Vence em: {texto_validade}"
-        )
-        
-        # 🔥 USA A FUNÇÃO HELPER
-        notificar_admin_principal(bot_data, msg_admin)
+                # 🔥 FIX 2: RESTAURA A LÓGICA DE AUTO-CORREÇÃO DE ID (Do Antigo)
+                if not target_id.isdigit():
+                    logger.info(f"⚠️ ID '{target_id}' inválido. Buscando Lead...")
+                    clean_user = str(pedido.username).lower().replace("@", "").strip()
+                    lead = db.query(Lead).filter(
+                        Lead.bot_id == pedido.bot_id,
+                        (func.lower(Lead.username) == clean_user) | (func.lower(Lead.username) == f"@{clean_user}")
+                    ).order_by(desc(Lead.created_at)).first()
+                    
+                    if lead and lead.user_id and lead.user_id.isdigit():
+                        target_id = lead.user_id
+                        pedido.telegram_id = target_id
+                        db.commit()
+                        logger.info(f"✅ ID corrigido para: {target_id}")
+
+                if target_id.isdigit():
+                    # --- A) ENTREGA PRINCIPAL ---
+                    try: 
+                        canal_id = bot_data.id_canal_vip
+                        if str(canal_id).replace("-","").isdigit():
+                             canal_id = int(str(canal_id).strip())
+
+                        try: tb.unban_chat_member(canal_id, int(target_id))
+                        except: pass
+
+                        link_acesso = None
+                        try:
+                            convite = tb.create_chat_invite_link(
+                                chat_id=canal_id, 
+                                member_limit=1, 
+                                name=f"Venda {pedido.first_name}"
+                            )
+                            link_acesso = convite.invite_link
+                        except:
+                            link_acesso = pedido.link_acesso 
+
+                        if link_acesso:
+                            msg_cliente = (
+                                f"✅ <b>Pagamento Confirmado!</b>\n"
+                                f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                                f"Seu acesso exclusivo:\n👉 {link_acesso}"
+                            )
+                            tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
+                        else:
+                            tb.send_message(int(target_id), "✅ <b>Pagamento Confirmado!</b>\nVocê já pode acessar o canal VIP.", parse_mode="HTML")
+                        
+                        logger.info(f"✅ Entrega principal enviada para {target_id}")
+
+                    except Exception as e_main:
+                        logger.error(f"Erro na entrega principal: {e_main}")
+
+                    # --- B) ENTREGA DO ORDER BUMP ---
+                    if pedido.tem_order_bump:
+                        try:
+                            bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
+                            if bump_config and bump_config.link_acesso:
+                                msg_bump = f"🎁 <b>BÔNUS LIBERADO!</b>\n\nVocê garantiu acesso ao: 👉 <b>{bump_config.nome_produto}</b>\n\n🔗 <b>Acesse aqui:</b>\n{bump_config.link_acesso}"
+                                tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                logger.info("✅ Order Bump entregue!")
+                        except Exception as e_bump:
+                            logger.error(f"Erro Bump: {e_bump}")
+
+                    # --- C) NOTIFICAÇÃO ADMIN ---
+                    msg_admin = (
+                        f"💰 <b>VENDA REALIZADA!</b>\n\n"
+                        f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+                        f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
+                        f"📦 Plano: {pedido.plano_nome}\n"
+                        f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>"
+                    )
+                    try: notificar_admin_principal(bot_data, msg_admin)
+                    except: pass
+                    
+                    # Marca como enviado
+                    pedido.mensagem_enviada = True
+                    db.commit()
+
+        except Exception as e_tg:
+            logger.error(f"❌ Erro Telegram/Entrega: {e_tg}")
 
         return {"status": "received"}
 
     except Exception as e:
         logger.error(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return {"status": "error"}
 
 # =========================================================
