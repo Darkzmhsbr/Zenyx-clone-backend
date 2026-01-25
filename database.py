@@ -358,8 +358,10 @@ class Lead(Base):
     # 🔥 CAMPO NOVO (CORREÇÃO DO VITALÍCIO/ERRO 500)
     expiration_date = Column(DateTime, nullable=True)
 
-    # Relacionamentos (Essencial para o SQLAlchemy não se perder)
-    bot = relationship("Bot", back_populates="leads")
+    # No arquivo database.py, dentro de class Lead(Base):
+
+    # Substitua a linha antiga do relationship por esta:
+    bot = relationship("Bot", back_populates="leads", overlaps="bot_ref")
     # Se TrackingLink tiver back_populates="leads", descomente abaixo:
     # tracking_link = relationship("TrackingLink", back_populates="leads")
 

@@ -3883,7 +3883,7 @@ async def obter_estatisticas_funil(
 # 🔥 ROTA ATUALIZADA: /api/admin/contacts
 # ============================================================
 # ============================================================
-# 🔥 ROTA DE CONTATOS (BLINDADA CONTRA ERRO 500 + DEDUPLICAÇÃO)
+# 🔥 ROTA DE CONTATOS (V4.0 - CORREÇÃO TOTAL DE DUPLICATAS)
 # ============================================================
 @app.get("/api/admin/contacts")
 async def get_contacts(
@@ -3895,43 +3895,49 @@ async def get_contacts(
     current_user: User = Depends(get_current_user)
 ):
     try:
-        # 1. Busca Bots Segura
+        # 1. Busca IDs dos Bots de forma segura (SQL Direto)
         bot_ids_query = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
         user_bot_ids = [b[0] for b in bot_ids_query]
         
+        # Helper para limpar data e timezone
         def clean_date(dt):
             if not dt: return None
             return dt.replace(tzinfo=None)
 
+        # Se não tiver bots, retorna vazio
         if not user_bot_ids:
             return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        # Definição dos bots alvo
-        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
+        # Validação de segurança do bot_id
+        if bot_id and bot_id not in user_bot_ids:
+            return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
+        # Define quais bots vamos consultar
+        bots_alvo = [bot_id] if bot_id else user_bot_ids
+        
+        # Prepara a paginação
         offset = (page - 1) * per_page
         
-        # ------------------------------------------------------------
-        # CENÁRIO 1: Filtro "TODOS" (Onde estava o erro 500)
-        # ------------------------------------------------------------
+        # Dicionário Mágico para Remover Duplicatas (Chave = BotID_TelegramID)
+        contatos_unicos = {}
+
+        # ============================================================
+        # CENÁRIO 1: "TODOS" (Mescla Leads + Pedidos)
+        # ============================================================
         if status == "todos":
-            contatos_unicos = {}
-            
-            # A. Busca LEADS
-            q_leads = db.query(Lead).filter(Lead.bot_id.in_(bots_alvo)).all()
-            
-            for l in q_leads:
+            # A. Processa LEADS
+            leads = db.query(Lead).filter(Lead.bot_id.in_(bots_alvo)).all()
+            for l in leads:
                 tid = str(l.user_id).strip()
-                key = f"{l.bot_id}_{tid}" # Chave Única
+                key = f"{l.bot_id}_{tid}"
                 
-                # 🔥 FIX DO ERRO 500: Usa getattr para não quebrar se faltar no model
+                # Tenta pegar a data de expiração do lead (se existir a coluna)
                 data_lead = getattr(l, 'expiration_date', None)
 
                 contatos_unicos[key] = {
                     "id": l.id,
                     "telegram_id": tid,
                     "user_id": tid,
-                    "bot_id": l.bot_id,
                     "first_name": l.nome or "Sem nome",
                     "username": l.username,
                     "plano_nome": "-",
@@ -3943,11 +3949,10 @@ async def get_contacts(
                     "origem": "lead",
                     "custom_expiration": clean_date(data_lead)
                 }
-            
-            # B. Busca PEDIDOS e faz MERGE (Remove Duplicatas)
-            q_pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo)).all()
-            
-            for p in q_pedidos:
+
+            # B. Processa PEDIDOS (Sobrepõe Leads para atualizar status)
+            pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo)).order_by(Pedido.created_at.asc()).all()
+            for p in pedidos:
                 tid = str(p.telegram_id).strip()
                 key = f"{p.bot_id}_{tid}"
                 
@@ -3955,10 +3960,9 @@ async def get_contacts(
                 if p.status in ["paid", "approved", "active"]: st_funil = "fundo"
                 elif p.status == "expired": st_funil = "expirado"
                 
-                # Pega a melhor data do pedido
-                data_pedido = clean_date(p.data_expiracao) or clean_date(p.custom_expiration)
+                data_exp = clean_date(p.data_expiracao) or clean_date(p.custom_expiration)
 
-                dados_pedido = {
+                obj_pedido = {
                     "id": p.id,
                     "telegram_id": tid,
                     "user_id": tid,
@@ -3971,43 +3975,24 @@ async def get_contacts(
                     "created_at": clean_date(p.created_at),
                     "status_funil": st_funil,
                     "origem": "pedido",
-                    "custom_expiration": data_pedido
+                    "custom_expiration": data_exp
                 }
 
-                # LÓGICA DE DEDUPLICAÇÃO (AQUI É QUE REMOVE OS TRIPLOS)
+                # Lógica de Merge: Só atualiza se o pedido for 'melhor' que o lead existente
                 if key in contatos_unicos:
-                    # Se já existe lead, só atualiza se o pedido for relevante
-                    existente = contatos_unicos[key]
-                    
-                    # Se o pedido tem data e o lead não, ganha o pedido
-                    if dados_pedido["custom_expiration"]:
-                        contatos_unicos[key] = dados_pedido
-                    # Se o pedido é pago, ganha o pedido
-                    elif dados_pedido["status"] in ["paid", "approved", "active"]:
-                        contatos_unicos[key] = dados_pedido
-                    # Senão, mantém o que já estava (evita sobrescrever com dados velhos)
+                    current = contatos_unicos[key]
+                    if data_exp or p.status in ["paid", "approved", "active"]:
+                        contatos_unicos[key] = obj_pedido
+                    elif p.created_at and current["created_at"] and p.created_at > current["created_at"]:
+                        contatos_unicos[key] = obj_pedido
                 else:
-                    contatos_unicos[key] = dados_pedido
-            
-            # Transforma em lista
-            all_contacts = list(contatos_unicos.values())
-            all_contacts.sort(key=lambda x: x["created_at"] or datetime.min, reverse=True)
-            
-            total = len(all_contacts)
-            paginated = all_contacts[offset:offset + per_page]
-            
-            return {
-                "data": paginated,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page if per_page > 0 else 0
-            }
+                    contatos_unicos[key] = obj_pedido
 
-        # ------------------------------------------------------------
-        # CENÁRIO 2: Filtros Específicos (Pagantes, Pendentes...)
-        # ------------------------------------------------------------
+        # ============================================================
+        # CENÁRIO 2: FILTROS ESPECÍFICOS (PAGANTES, PENDENTES...)
+        # ============================================================
         else:
+            # Busca TODOS os pedidos do filtro (sem limit ainda, para poder deduplicar)
             query = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo))
             
             if status == "meio" or status == "pendentes":
@@ -4016,18 +4001,20 @@ async def get_contacts(
                 query = query.filter(Pedido.status.in_(["paid", "active", "approved"]))
             elif status == "expirado" or status == "expirados":
                 query = query.filter(Pedido.status == "expired")
+            
+            # Ordena ASCENDENTE: O último registro do loop será o mais recente
+            raw_pedidos = query.order_by(Pedido.created_at.asc()).all()
+
+            for p in raw_pedidos:
+                tid = str(p.telegram_id).strip()
+                key = f"{p.bot_id}_{tid}"
                 
-            query = query.order_by(desc(Pedido.created_at))
-            
-            total = query.count()
-            pedidos = query.offset(offset).limit(per_page).all()
-            
-            contacts = []
-            for p in pedidos:
-                contacts.append({
+                # Como o loop roda do mais antigo pro mais novo, o dicionário
+                # sempre vai ficar com a ÚLTIMA versão do pedido (eliminando os velhos)
+                contatos_unicos[key] = {
                     "id": p.id,
-                    "telegram_id": str(p.telegram_id),
-                    "user_id": str(p.telegram_id),
+                    "telegram_id": tid,
+                    "user_id": tid,
                     "first_name": p.first_name or "Sem nome",
                     "username": p.username,
                     "plano_nome": p.plano_nome,
@@ -4035,22 +4022,38 @@ async def get_contacts(
                     "status": p.status,
                     "role": "user",
                     "created_at": clean_date(p.created_at),
-                    # 🔥 DATA CORRETA:
                     "custom_expiration": clean_date(p.data_expiracao) or clean_date(p.custom_expiration),
                     "origem": "pedido"
-                })
-            
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page if per_page > 0 else 0
-            }
+                }
+
+        # ============================================================
+        # 3. FINALIZAÇÃO: ORDENAÇÃO E PAGINAÇÃO (NO PYTHON)
+        # ============================================================
+        
+        # Converte o dicionário (que removeu as duplicatas) em lista
+        all_contacts = list(contatos_unicos.values())
+        
+        # Ordena a lista final por data (Mais recentes primeiro)
+        all_contacts.sort(key=lambda x: x["created_at"] or datetime.min, reverse=True)
+        
+        # Calcula totais
+        total = len(all_contacts)
+        
+        # Aplica a paginação na LISTA LIMPA
+        paginated = all_contacts[offset:offset + per_page]
+        
+        # Retorno final para o Frontend
+        return {
+            "data": paginated,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page if per_page > 0 else 0
+        }
 
     except Exception as e:
         logger.error(f"Erro contatos: {e}")
-        # Retorna lista vazia em vez de 500 se algo der muito errado
+        # Retorna lista vazia para não quebrar a tela em caso de erro grave
         return {"data": [], "total": 0, "page": 1, "per_page": per_page, "total_pages": 0}
         
 # ============================================================
