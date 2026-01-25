@@ -97,6 +97,7 @@ class Token(BaseModel):
     token_type: str
     user_id: int
     username: str
+    has_bots: bool # 🆕 Adicionado para o Onboarding
 
 class TokenData(BaseModel):
     username: str = None
@@ -1612,29 +1613,24 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     from database import User
     
-    # 1. LOG PARA DEBUG (Ver se o token está chegando)
-    logger.info(f"🔑 Tentativa de login: {user_data.username} | Token: {str(user_data.turnstile_token)[:10]}...")
+    # 1. LOG PARA DEBUG
+    logger.info(f"🔑 Tentativa de login: {user_data.username}")
 
     # 2. VERIFICAÇÃO TURNSTILE
-    # Se estiver rodando localmente (localhost), as vezes queremos pular, 
-    # mas no servidor (Railway) é obrigatório.
-    # 2. VERIFICAÇÃO TURNSTILE
     if not verify_turnstile(user_data.turnstile_token):
-         # 👇 MUDANÇA AQUI: user_id=None (ao invés de 0)
          log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
                    description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
          raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
-    # 3. Lógica padrão de Login
+    # 3. Lógica de Login
     user = db.query(User).filter(User.username == user_data.username).first()
     
     if not user or not verify_password(user_data.password, user.password_hash):
-        if user:
-            log_action(db=db, user_id=user.id, username=user.username, action="login_failed", resource_type="auth", 
-                       description="Senha incorreta", success=False, error_message="Senha incorreta", 
-                       ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     
+    # Verifica se o usuário já tem ao menos um bot criado
+    has_bots = len(user.bots) > 0
+
     log_action(db=db, user_id=user.id, username=user.username, action="login_success", resource_type="auth", 
                description="Login realizado", ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     
@@ -1648,24 +1644,25 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         "access_token": access_token,
         "token_type": "bearer",
         "user_id": user.id,
-        "username": user.username
+        "username": user.username,
+        "has_bots": has_bots
     }
 
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
     """
-    Retorna informações do usuário logado
+    Retorna informações do usuário logado e status de bots para o Onboarding
     """
     return {
         "id": current_user.id,
         "username": current_user.username,
         "email": current_user.email,
         "full_name": current_user.full_name,
-        # 👇 ADICIONADO: Agora o front vai saber quem manda!
         "is_superuser": current_user.is_superuser, 
-        "is_active": current_user.is_active
+        "is_active": current_user.is_active,
+        "has_bots": len(current_user.bots) > 0 # 🔥 Crucial para destravar o Sidebar
     }
-
+    
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
 
 # 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
@@ -1729,7 +1726,16 @@ def criar_bot(
     e devolve o ID para o Frontend continuar o fluxo (Step 1 -> Step 2).
     """
     
-    # Prepara o objeto Bot
+    # 1. VERIFICAÇÃO PREVENTIVA (Evita explosão de erro 500 no banco)
+    bot_existente = db.query(Bot).filter(Bot.token == bot_data.token).first()
+    if bot_existente:
+        if bot_existente.owner_id == current_user.id:
+            logger.info(f"🔄 Recuperando bot ID {bot_existente.id} para destravar fluxo.")
+            return {"id": bot_existente.id, "nome": bot_existente.nome, "status": "recuperado", "has_bots": True}
+        else:
+            raise HTTPException(status_code=409, detail="Este token de bot já está sendo usado por outro usuário.")
+
+    # 2. PREPARA O OBJETO BOT
     novo_bot = Bot(
         nome=bot_data.nome,
         token=bot_data.token,
@@ -1764,7 +1770,7 @@ def criar_bot(
         )
         
         logger.info(f"✅ Bot criado: {novo_bot.nome} (ID: {novo_bot.id})")
-        return {"id": novo_bot.id, "nome": novo_bot.nome, "status": "criado"}
+        return {"id": novo_bot.id, "nome": novo_bot.nome, "status": "criado", "has_bots": True}
 
     except IntegrityError as e:
         db.rollback() # Limpa a transação falha
@@ -1781,9 +1787,8 @@ def criar_bot(
             if bot_existente and bot_existente.owner_id == current_user.id:
                 logger.info(f"🔄 Recuperando bot ID {bot_existente.id} para destravar fluxo.")
                 
-                # RETORNA SUCESSO (200) COM O ID EXISTENTE
-                # Isso faz o Frontend pensar que criou agora e redireciona para o passo 2
-                return {"id": bot_existente.id, "nome": bot_existente.nome, "status": "recuperado"}
+                # RETORNA SUCESSO (200) COM O ID EXISTENTE + CHAVE ONBOARDING
+                return {"id": bot_existente.id, "nome": bot_existente.nome, "status": "recuperado", "has_bots": True}
             
             else:
                 # Se o token já existe mas é de OUTRA pessoa
