@@ -2339,7 +2339,7 @@ def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
 def get_order_bump(
     bot_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user) # 🔒 AUTH
+    
 ):
     # 🔒 VERIFICA PROPRIEDADE
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
@@ -2358,7 +2358,7 @@ def save_order_bump(
     bot_id: int, 
     dados: OrderBumpCreate, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user) # 🔒 AUTH
+    c
 ):
     # 🔒 VERIFICA PROPRIEDADE
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
