@@ -2328,21 +2328,16 @@ def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
         logger.error(f"Erro ao deletar plano: {e}")
         raise HTTPException(status_code=500, detail="Erro ao deletar plano.")
 
-
-# =========================================================
-# 🛒 ORDER BUMP API
-# =========================================================
 # =========================================================
 # 🛒 ORDER BUMP API (BLINDADO)
 # =========================================================
 @app.get("/api/admin/bots/{bot_id}/order-bump")
 def get_order_bump(
     bot_id: int, 
-    db: Session = Depends(get_db),
-    
+    db: Session = Depends(get_db)
+    # REMOVIDO current_user para evitar erro 401 no Mini App
 ):
-    # 🔒 VERIFICA PROPRIEDADE
-    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    # Nota: No GET não usamos verificar_bot_pertence_usuario pois o acesso é público (Vitrine)
     
     bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
     if not bump:
@@ -2358,9 +2353,9 @@ def save_order_bump(
     bot_id: int, 
     dados: OrderBumpCreate, 
     db: Session = Depends(get_db),
-    c
+    current_user = Depends(get_current_user) # 🔒 AUTH MANTIDA NO SALVAR
 ):
-    # 🔒 VERIFICA PROPRIEDADE
+    # 🔒 VERIFICA PROPRIEDADE (Só o dono pode alterar)
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
     bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
