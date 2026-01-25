@@ -3878,9 +3878,8 @@ async def obter_estatisticas_funil(
 # ============================================================
 # 🔥 ROTA ATUALIZADA: /api/admin/contacts (CORREÇÃO DE FUSO HORÁRIO)
 # ============================================================
-
 # ============================================================
-# 🔥 ROTA ATUALIZADA: /api/admin/contacts
+# 🔥 ROTA: LISTAGEM DE CONTATOS UNIFICADA (CORRIGE DUPLICATAS E VITALÍCIO)
 # ============================================================
 @app.get("/api/admin/contacts")
 async def get_contacts(
@@ -3889,143 +3888,148 @@ async def get_contacts(
     page: int = 1,
     per_page: int = 50,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # 🔒 AUTH
+    current_user: User = Depends(get_current_user)
 ):
     try:
-        # 🔥 SOLUÇÃO: Pegar IDs dos bots sem acessar relação lazy
+        # 1. Identifica os Bots do Usuário
         user_bot_ids = [bot.id for bot in current_user.bots]
-        
-        # Helper para garantir data sem timezone
-        def clean_date(dt):
-            if not dt: return datetime.utcnow()
-            return dt.replace(tzinfo=None)
-
-        # Se conta nova (sem bots), retorna vazio imediatamente
         if not user_bot_ids:
-            return {
-                "data": [], "total": 0, "page": page, 
-                "per_page": per_page, "total_pages": 0
-            }
+            return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        # Validação: Se pediu um bot específico, ele é seu?
+        # Validação de segurança
         if bot_id and bot_id not in user_bot_ids:
             return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        offset = (page - 1) * per_page
-        all_contacts = []
+        # Define quais bots consultar
+        bots_alvo = [bot_id] if bot_id else user_bot_ids
 
-        # ------------------------------------------------------------
-        # CENÁRIO 1: Filtro "TODOS" (Mescla Leads + Pedidos)
-        # ------------------------------------------------------------
-        if status == "todos":
-            contatos_unicos = {}
+        # 2. BUSCA TUDO (Leads e Pedidos) para processar em memória
+        # Isso é necessário para garantir que o merge funcione perfeitamente
+        
+        # A) Busca LEADS
+        leads = db.query(Lead).filter(Lead.bot_id.in_(bots_alvo)).all()
+        
+        # B) Busca PEDIDOS (Apenas os relevantes para status)
+        pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo)).all()
+
+        # 3. DICIONÁRIO DE UNIFICAÇÃO (A Mágica acontece aqui)
+        # Chave = BotID_TelegramID (garante unicidade por bot)
+        contatos_map = {}
+
+        # --- Helper para limpar Data ---
+        def clean_date(dt):
+            if not dt: return None
+            return dt.replace(tzinfo=None)
+
+        # --- PROCESSA LEADS PRIMEIRO ---
+        for l in leads:
+            tid = str(l.user_id).strip()
+            unique_key = f"{l.bot_id}_{tid}"
             
-            # A. Busca LEADS (Filtrado por user_bot_ids)
-            q_leads = db.query(Lead).filter(Lead.bot_id.in_(user_bot_ids))
-            if bot_id: q_leads = q_leads.filter(Lead.bot_id == bot_id)
-            leads = q_leads.all()
+            contatos_map[unique_key] = {
+                "id": l.id, # ID do Lead
+                "telegram_id": tid,
+                "user_id": tid,
+                "bot_id": l.bot_id,
+                "first_name": l.nome or "Sem nome",
+                "username": l.username,
+                "plano_nome": "-",
+                "valor": 0.0,
+                "status": "pending", # Lead começa como pending
+                "role": "user",
+                "created_at": clean_date(l.created_at),
+                "status_funil": "topo",
+                "origem": "lead",
+                "custom_expiration": clean_date(l.expiration_date) # Pega data se tiver no lead
+            }
+
+        # --- PROCESSA PEDIDOS E FAZ O MERGE ---
+        for p in pedidos:
+            tid = str(p.telegram_id).strip()
+            unique_key = f"{p.bot_id}_{tid}"
             
-            for l in leads:
-                tid = str(l.user_id)
-                contatos_unicos[tid] = {
-                    "id": l.id,
-                    "telegram_id": tid,
-                    "user_id": tid,
-                    "first_name": l.nome or "Sem nome",
-                    "username": l.username,
-                    "plano_nome": "-",
-                    "valor": 0.0,
-                    "status": "pending",
-                    "role": "user",
-                    "created_at": clean_date(l.created_at),
-                    "status_funil": "topo",
-                    "origem": "lead"
-                }
-            
-            # B. Busca PEDIDOS (Filtrado por user_bot_ids)
-            q_pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(user_bot_ids))
-            if bot_id: q_pedidos = q_pedidos.filter(Pedido.bot_id == bot_id)
-            pedidos = q_pedidos.all()
-            
-            for p in pedidos:
-                tid = str(p.telegram_id)
-                st_funil = "meio"
-                if p.status in ["paid", "approved", "active"]: st_funil = "fundo"
-                elif p.status == "expired": st_funil = "expirado"
+            # Determina status do funil deste pedido
+            st_funil = "meio"
+            if p.status in ["paid", "approved", "active"]: st_funil = "fundo"
+            elif p.status == "expired": st_funil = "expirado"
+
+            # Se já existe (veio do Lead ou de outro pedido anterior), atualizamos
+            if unique_key in contatos_map:
+                contato = contatos_map[unique_key]
                 
-                contatos_unicos[tid] = {
-                    "id": p.id,
+                # Prioridade de Status: Se o pedido é Pago, ele manda no status
+                if p.status in ["paid", "approved", "active"]:
+                    contato["status"] = "active"
+                    contato["status_funil"] = "fundo"
+                    contato["plano_nome"] = p.plano_nome
+                    contato["valor"] = float(p.valor)
+                
+                # Prioridade de Data: Se o pedido tem data, ele sobrescreve
+                if p.data_expiracao:
+                    contato["custom_expiration"] = clean_date(p.data_expiracao)
+                elif p.custom_expiration:
+                    contato["custom_expiration"] = clean_date(p.custom_expiration)
+                
+                # Atualiza nome se o do pedido for melhor
+                if p.first_name and len(p.first_name) > len(contato["first_name"]):
+                    contato["first_name"] = p.first_name
+
+            else:
+                # Se não existia (usuário comprou sem passar pelo lead capture?), cria novo
+                contatos_map[unique_key] = {
+                    "id": p.id, # ID do Pedido
                     "telegram_id": tid,
                     "user_id": tid,
+                    "bot_id": p.bot_id,
                     "first_name": p.first_name or "Sem nome",
                     "username": p.username,
                     "plano_nome": p.plano_nome,
-                    "valor": p.valor,
+                    "valor": float(p.valor),
                     "status": p.status,
                     "role": "user",
                     "created_at": clean_date(p.created_at),
                     "status_funil": st_funil,
                     "origem": "pedido",
-                    "custom_expiration": p.custom_expiration
+                    "custom_expiration": clean_date(p.data_expiracao) or clean_date(p.custom_expiration)
                 }
-            
-            all_contacts = list(contatos_unicos.values())
-            all_contacts.sort(key=lambda x: x["created_at"], reverse=True)
-            
-            total = len(all_contacts)
-            paginated = all_contacts[offset:offset + per_page]
-            
-            return {
-                "data": paginated,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
 
-        # ------------------------------------------------------------
-        # CENÁRIO 2: Outros Filtros (Consultam direto Pedido)
-        # ------------------------------------------------------------
-        else:
-            query = db.query(Pedido).filter(Pedido.bot_id.in_(user_bot_ids))
-            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
-            
-            if status == "meio" or status == "pendentes":
-                query = query.filter(Pedido.status == "pending")
-            elif status == "fundo" or status == "pagantes":
-                query = query.filter(Pedido.status.in_(["paid", "active", "approved"]))
-            elif status == "expirado" or status == "expirados":
-                query = query.filter(Pedido.status == "expired")
-                
-            total = query.count()
-            pedidos = query.offset(offset).limit(per_page).all()
-            
-            contacts = []
-            for p in pedidos:
-                contacts.append({
-                    "id": p.id,
-                    "telegram_id": str(p.telegram_id),
-                    "user_id": str(p.telegram_id),
-                    "first_name": p.first_name or "Sem nome",
-                    "username": p.username,
-                    "plano_nome": p.plano_nome,
-                    "valor": p.valor,
-                    "status": p.status,
-                    "role": "user",
-                    "created_at": clean_date(p.created_at)
-                })
-            
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
-            
+        # 4. CONVERTE PARA LISTA E APLICA FILTROS FINAIS
+        lista_final = list(contatos_map.values())
+
+        # Filtro de Status
+        if status != "todos":
+            if status == "pagantes":
+                # Filtra apenas quem é active, paid ou approved
+                lista_final = [c for c in lista_final if c["status"] in ["active", "paid", "approved"]]
+            elif status == "pendentes":
+                lista_final = [c for c in lista_final if c["status"] == "pending"]
+            elif status == "expirados":
+                lista_final = [c for c in lista_final if c["status"] == "expired"]
+            else:
+                # Filtro genérico
+                lista_final = [c for c in lista_final if c["status"] == status]
+
+        # 5. ORDENAÇÃO E PAGINAÇÃO
+        # Ordena por data de criação (mais novos primeiro)
+        lista_final.sort(key=lambda x: x["created_at"] or datetime.min, reverse=True)
+
+        total = len(lista_final)
+        offset = (page - 1) * per_page
+        paginated_data = lista_final[offset:offset + per_page]
+
+        # 6. RETORNO COMPATÍVEL COM O FRONTEND
+        return {
+            "data": paginated_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page if per_page > 0 else 0
+        }
+
     except Exception as e:
-        logger.error(f"Erro contatos: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Erro na listagem de contatos: {e}")
+        # Retorna lista vazia em caso de erro para não quebrar o front
+        return {"data": [], "total": 0, "page": 1, "per_page": per_page, "total_pages": 0}
 
 # ============================================================
 # 🔥 ROTAS COMPLETAS - Adicione no main.py
