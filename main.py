@@ -6189,6 +6189,66 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "total_revenue": 0.0,
             "active_users": 0
         }
+
+# =========================================================
+# 📚 ROTA DE TUTORIAIS (CONTEÚDO ESTRUTURADO DO PDF)
+# =========================================================
+@app.get("/api/admin/tutorials")
+def get_tutorials(current_user = Depends(get_current_user)):
+    """
+    Retorna o conteúdo didático do Guia Definitivo Zenyx 2026.
+    """
+    return [
+        {
+            "id": 1,
+            "icon": "🤖",
+            "title": "Etapa 1 - Criando o Bot no Telegram",
+            "content": "Acesse o @BotFather, execute /newbot e defina o Nome e Username (terminando em 'bot'). Guarde o Token API gerado."
+        },
+        {
+            "id": 2,
+            "icon": "🛡️",
+            "title": "Etapa 2 - Criação do Canal ou Grupo VIP",
+            "content": "Crie o canal/grupo como PRIVADO e adicione seu bot como administrador com todas as permissões de gestão."
+        },
+        {
+            "id": 3,
+            "icon": "🆔",
+            "title": "Etapa 3 - Obtendo o ID do Canal/Grupo",
+            "content": "Use o @ScanIDBot. Clique em 'Channel' ou 'Group', selecione seu VIP e copie o ID numérico (ex: -100...)."
+        },
+        {
+            "id": 4,
+            "icon": "🚀",
+            "title": "Etapa 4 - Criar Bot na Plataforma Zenyx",
+            "content": "No menu 'Meus Bots > Novo Bot', insira o Nome, Username, Token API e o ID do VIP capturado anteriormente."
+        },
+        {
+            "id": 5,
+            "icon": "⚙️",
+            "title": "Etapa 5 - Configurações Gerais",
+            "content": "Em 'Gerenciar Bots', configure seu ID de Admin Principal para notificações e o @ de Suporte para seus clientes."
+        },
+        {
+            "id": 6,
+            "icon": "💎",
+            "title": "Etapa 6 - Criar Planos de Acesso",
+            "content": "Defina Nome, Preço e Duração (ex: 7 dias, 30 dias ou Vitalício) no menu 'Planos e Ofertas'."
+        },
+        {
+            "id": 7,
+            "icon": "💬",
+            "title": "Etapa 7 - Fluxo de Mensagens (Flow Chat)",
+            "content": "Configure o funil: Boas-vindas > Provas Sociais > Oferta. Lembre-se: Use Botão OU Delay, nunca os dois no mesmo passo."
+        },
+        {
+            "id": 8,
+            "icon": "💰",
+            "title": "Etapa 8 - Ativar Oferta e Checkout",
+            "content": "Na última mensagem do seu fluxo, ative 'Mostrar planos junto com essa mensagem' para habilitar o pagamento automático."
+        }
+    ]
+    
 # =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
 # =========================================================
