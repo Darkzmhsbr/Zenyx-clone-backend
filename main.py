@@ -2973,10 +2973,6 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
         db.delete(cat)
         db.commit()
     return {"status": "deleted"}
-
-# =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL BLINDADA
-# =========================================================
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO BLINDADA + CORREÇÃO DE THREAD
 # =========================================================
@@ -2984,8 +2980,11 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
 # 💳 WEBHOOK PIX (PUSHIN PAY) - ROTA DUPLA CORRIGIDA
 # =========================================================
 # 🔥 O SEGREDO: Adicionamos a rota que estava dando 404 no log!
-@app.post("/api/webhooks/pushinpay") 
-@app.post("/webhook/pix")
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - V4.0 (CORREÇÃO VITALÍCIO + NOTIFICAÇÃO)
+# =========================================================
+@app.post("/api/webhooks/pushinpay") # Rota Nova
+@app.post("/webhook/pix")             # Rota Antiga
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!") 
     try:
@@ -3020,7 +3019,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             print(f"❌ Pedido {tx_id} não encontrado.")
             return {"status": "ok", "msg": "Order not found"}
 
-        if pedido.status in ["approved", "paid"]:
+        if pedido.status in ["approved", "paid", "active"]:
             return {"status": "ok", "msg": "Already paid"}
 
         # 4. CÁLCULO DA DATA DE EXPIRAÇÃO
@@ -3038,7 +3037,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             nm = pedido.plano_nome.lower()
             if "vital" not in nm and "mega" not in nm and "eterno" not in nm:
                 dias = 30
-                if "24" in nm or "diario" in nm: dias = 1
+                if "24" in nm or "diario" in nm or "1 dia" in nm: dias = 1
                 elif "semanal" in nm: dias = 7
                 elif "trimestral" in nm: dias = 90
                 elif "anual" in nm: dias = 365
@@ -3049,10 +3048,25 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.data_aprovacao = now
         pedido.data_expiracao = data_validade     
         pedido.custom_expiration = data_validade
-        pedido.mensagem_enviada = False # Força tentar enviar agora
+        pedido.mensagem_enviada = False
         pedido.status_funil = 'fundo'
         pedido.pagou_em = now
         
+        # 🔥 FIX CRÍTICO: SINCRO COM LEAD (Corrige o bug do "Vitalício") 🔥
+        # Isso garante que a data apareça no painel de contatos
+        try:
+            lead = db.query(Lead).filter(
+                Lead.bot_id == pedido.bot_id, 
+                Lead.user_id == pedido.telegram_id
+            ).first()
+            
+            if lead:
+                lead.status = "active"
+                lead.expiration_date = data_validade # <--- AQUI ESTÁ A CORREÇÃO
+                logger.info(f"✅ Lead {lead.username} sincronizado. Validade: {data_validade}")
+        except Exception as e_lead:
+            logger.error(f"⚠️ Erro ao sync Lead: {e_lead}")
+
         db.commit()
         
         # Atualiza Tracking
@@ -3069,64 +3083,43 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
         
         # ======================================================================
-        # 6. ENTREGA (COM A CORREÇÃO DE THREAD E ID)
+        # 6. ENTREGA E NOTIFICAÇÕES (COMPLETO)
         # ======================================================================
         try:
             bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
             if bot_data:
-                # 🔥 FIX 1: threaded=False (Essencial para não falhar o envio)
                 tb = telebot.TeleBot(bot_data.token, threaded=False)
-                
                 target_id = str(pedido.telegram_id).strip()
 
-                # 🔥 FIX 2: RESTAURA A LÓGICA DE AUTO-CORREÇÃO DE ID (Do Antigo)
+                # Auto-correção de ID
                 if not target_id.isdigit():
-                    logger.info(f"⚠️ ID '{target_id}' inválido. Buscando Lead...")
                     clean_user = str(pedido.username).lower().replace("@", "").strip()
                     lead = db.query(Lead).filter(
                         Lead.bot_id == pedido.bot_id,
                         (func.lower(Lead.username) == clean_user) | (func.lower(Lead.username) == f"@{clean_user}")
                     ).order_by(desc(Lead.created_at)).first()
-                    
                     if lead and lead.user_id and lead.user_id.isdigit():
                         target_id = lead.user_id
                         pedido.telegram_id = target_id
                         db.commit()
-                        logger.info(f"✅ ID corrigido para: {target_id}")
 
                 if target_id.isdigit():
                     # --- A) ENTREGA PRINCIPAL ---
                     try: 
                         canal_id = bot_data.id_canal_vip
-                        if str(canal_id).replace("-","").isdigit():
-                             canal_id = int(str(canal_id).strip())
+                        if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
 
                         try: tb.unban_chat_member(canal_id, int(target_id))
                         except: pass
 
-                        link_acesso = None
-                        try:
-                            convite = tb.create_chat_invite_link(
-                                chat_id=canal_id, 
-                                member_limit=1, 
-                                name=f"Venda {pedido.first_name}"
-                            )
-                            link_acesso = convite.invite_link
-                        except:
-                            link_acesso = pedido.link_acesso 
-
-                        if link_acesso:
-                            msg_cliente = (
-                                f"✅ <b>Pagamento Confirmado!</b>\n"
-                                f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                                f"Seu acesso exclusivo:\n👉 {link_acesso}"
-                            )
-                            tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
-                        else:
-                            tb.send_message(int(target_id), "✅ <b>Pagamento Confirmado!</b>\nVocê já pode acessar o canal VIP.", parse_mode="HTML")
-                        
+                        convite = tb.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Venda {pedido.first_name}")
+                        msg_cliente = (
+                            f"✅ <b>Pagamento Confirmado!</b>\n"
+                            f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                            f"Seu acesso exclusivo:\n👉 {convite.invite_link}"
+                        )
+                        tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
                         logger.info(f"✅ Entrega principal enviada para {target_id}")
-
                     except Exception as e_main:
                         logger.error(f"Erro na entrega principal: {e_main}")
 
@@ -3135,24 +3128,26 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         try:
                             bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
                             if bump_config and bump_config.link_acesso:
-                                msg_bump = f"🎁 <b>BÔNUS LIBERADO!</b>\n\nVocê garantiu acesso ao: 👉 <b>{bump_config.nome_produto}</b>\n\n🔗 <b>Acesse aqui:</b>\n{bump_config.link_acesso}"
+                                msg_bump = f"🎁 <b>BÔNUS LIBERADO!</b>\n\n👉 <b>{bump_config.nome_produto}</b>\n🔗 {bump_config.link_acesso}"
                                 tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
                                 logger.info("✅ Order Bump entregue!")
                         except Exception as e_bump:
                             logger.error(f"Erro Bump: {e_bump}")
 
-                    # --- C) NOTIFICAÇÃO ADMIN ---
-                    msg_admin = (
-                        f"💰 <b>VENDA REALIZADA!</b>\n\n"
-                        f"🤖 Bot: <b>{bot_data.nome}</b>\n"
-                        f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
-                        f"📦 Plano: {pedido.plano_nome}\n"
-                        f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>"
-                    )
-                    try: notificar_admin_principal(bot_data, msg_admin)
-                    except: pass
+                    # --- C) NOTIFICAÇÃO ADMIN (COMPLETA) ---
+                    try: 
+                        msg_admin = (
+                            f"💰 <b>VENDA REALIZADA!</b>\n\n"
+                            f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+                            f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
+                            f"📦 Plano: {pedido.plano_nome}\n"
+                            f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+                            f"📅 Vence em: {texto_validade}"
+                        )
+                        notificar_admin_principal(bot_data, msg_admin)
+                    except Exception as e_adm:
+                        logger.error(f"Erro notificação admin: {e_adm}")
                     
-                    # Marca como enviado
                     pedido.mensagem_enviada = True
                     db.commit()
 
@@ -6444,3 +6439,234 @@ def debug_users_list(db: Session = Depends(get_db)):
         }
     except Exception as e:
         return {"erro_fatal": str(e)}
+
+# =========================================================
+# 💀 CRON JOB: REMOVEDOR DE USUÁRIOS VENCIDOS
+# =========================================================
+@app.get("/cron/check-expired")
+def cron_check_expired(db: Session = Depends(get_db)):
+    """
+    Roda periodicamente para remover usuários com acesso vencido.
+    Deve ser chamado por um Cron Job externo (ex: Railway Cron ou EasyCron).
+    """
+    logger.info("💀 Iniciando verificação de vencidos...")
+    now = datetime.utcnow()
+    
+    # 1. Busca pedidos aprovados que JÁ venceram (data_expiracao < agora)
+    vencidos = db.query(Pedido).filter(
+        Pedido.status.in_(['approved', 'active']), # Apenas ativos
+        Pedido.data_expiracao != None,
+        Pedido.data_expiracao < now
+    ).all()
+    
+    removidos = 0
+    erros = 0
+    
+    for pedido in vencidos:
+        try:
+            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+            if not bot_data: continue
+            
+            # Conecta no Telegram (Sem threads para evitar erro)
+            tb = telebot.TeleBot(bot_data.token, threaded=False)
+            
+            # Identifica o Canal
+            canal_id = bot_data.id_canal_vip
+            if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
+            
+            # --- AÇÃO DE REMOÇÃO ---
+            try:
+                # Banir (Kick) e Desbanir (Kick remove do grupo, Unban permite voltar pagando)
+                tb.ban_chat_member(canal_id, int(pedido.telegram_id))
+                time.sleep(1) # Espera 1s para o Telegram processar
+                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+                
+                # Avisa o usuário no privado
+                try:
+                    tb.send_message(int(pedido.telegram_id), "🚫 <b>Seu acesso expirou!</b>\n\nObrigado por ter ficado conosco. Renove seu plano para voltar!", parse_mode="HTML")
+                except: pass
+                
+                logger.info(f"💀 Usuário {pedido.first_name} ({pedido.telegram_id}) removido do bot {bot_data.nome}")
+            except Exception as e_kick:
+                logger.warning(f"⚠️ Erro ao remover {pedido.telegram_id} (Talvez já saiu): {e_kick}")
+            
+            # Atualiza status no Pedido
+            pedido.status = 'expired'
+            
+            # Atualiza status no Lead (Sincronia)
+            lead = db.query(Lead).filter(Lead.bot_id == pedido.bot_id, Lead.user_id == pedido.telegram_id).first()
+            if lead:
+                lead.status = 'expired'
+            
+            removidos += 1
+            db.commit()
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar vencido {pedido.id}: {e}")
+            erros += 1
+
+    return {
+        "status": "completed", 
+        "total_analisado": len(vencidos),
+        "removidos_sucesso": removidos, 
+        "erros": erros
+    }
+
+# =========================================================
+# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
+# =========================================================
+@app.get("/api/admin/fix-account-emergency")
+def fix_admin_account_emergency(db: Session = Depends(get_db)):
+    try:
+        # SEU ID DA PUSHIN PAY (FIXO)
+        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        USERNAME_ALVO = "AdminZenyx" 
+        
+        # 1. Tenta achar o usuário
+        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
+        
+        if user:
+            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
+            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
+            
+            user.pushin_pay_id = MY_PUSHIN_ID
+            user.is_superuser = True
+            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
+            
+            db.commit()
+            return {
+                "status": "restored", 
+                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
+                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
+            }
+        
+        else:
+            # CENÁRIO B: Recria o usuário (Sem o campo role)
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            hashed_password = pwd_context.hash("123456")
+            
+            new_user = User(
+                username=USERNAME_ALVO,
+                email="admin@zenyx.com",
+                hashed_password=hashed_password,
+                is_active=True,
+                is_superuser=True,
+                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
+                pushin_pay_id=MY_PUSHIN_ID,
+                created_at=datetime.utcnow()
+            )
+            db.add(new_user)
+            db.commit()
+            return {
+                "status": "created", 
+                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
+                "info": "Senha temporária: 123456"
+            }
+
+    except Exception as e:
+        return {"status": "error", "msg": str(e)}
+
+# =========================================================
+# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
+# =========================================================
+@app.get("/api/admin/debug-users-list")
+def debug_users_list(db: Session = Depends(get_db)):
+    try:
+        # 1. Conexão
+        db_url = str(engine.url)
+        host_info = db_url.split("@")[-1]
+        
+        # 2. Busca Usuários
+        users = db.query(User).all()
+        
+        lista_users = []
+        for u in users:
+            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
+            # Isso pega apenas as colunas que REALMENTE existem no banco
+            dados_usuario = {}
+            for key, value in u.__dict__.items():
+                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
+                    dados_usuario[key] = value
+            
+            lista_users.append(dados_usuario)
+            
+        return {
+            "CONEXAO": host_info,
+            "TOTAL": len(users),
+            "DADOS_REAIS": lista_users
+        }
+    except Exception as e:
+        return {"erro_fatal": str(e)}
+
+# =========================================================
+# 💀 CRON JOB: REMOVEDOR DE USUÁRIOS VENCIDOS
+# =========================================================
+@app.get("/cron/check-expired")
+def cron_check_expired(db: Session = Depends(get_db)):
+    """
+    Roda periodicamente para remover usuários com acesso vencido.
+    Deve ser chamado por um Cron Job externo (ex: Railway Cron ou EasyCron).
+    """
+    logger.info("💀 Iniciando verificação de vencidos...")
+    now = datetime.utcnow()
+    
+    # 1. Busca pedidos aprovados que JÁ venceram (data_expiracao < agora)
+    vencidos = db.query(Pedido).filter(
+        Pedido.status.in_(['approved', 'active']), # Apenas ativos
+        Pedido.data_expiracao != None,
+        Pedido.data_expiracao < now
+    ).all()
+    
+    removidos = 0
+    erros = 0
+    
+    for pedido in vencidos:
+        try:
+            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+            if not bot_data: continue
+            
+            # Conecta no Telegram (Sem threads para evitar erro)
+            tb = telebot.TeleBot(bot_data.token, threaded=False)
+            
+            # Identifica o Canal
+            canal_id = bot_data.id_canal_vip
+            if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
+            
+            # --- AÇÃO DE REMOÇÃO ---
+            try:
+                # Banir (Kick) e Desbanir (Kick remove do grupo, Unban permite voltar pagando)
+                tb.ban_chat_member(canal_id, int(pedido.telegram_id))
+                time.sleep(1) # Espera 1s para o Telegram processar
+                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+                
+                # Avisa o usuário no privado
+                try:
+                    tb.send_message(int(pedido.telegram_id), "🚫 <b>Seu acesso expirou!</b>\n\nObrigado por ter ficado conosco. Renove seu plano para voltar!", parse_mode="HTML")
+                except: pass
+                
+                logger.info(f"💀 Usuário {pedido.first_name} ({pedido.telegram_id}) removido do bot {bot_data.nome}")
+            except Exception as e_kick:
+                logger.warning(f"⚠️ Erro ao remover {pedido.telegram_id} (Talvez já saiu): {e_kick}")
+            
+            # Atualiza status no Pedido
+            pedido.status = 'expired'
+            
+            # Atualiza status no Lead (Sincronia)
+            lead = db.query(Lead).filter(Lead.bot_id == pedido.bot_id, Lead.user_id == pedido.telegram_id).first()
+            if lead:
+                lead.status = 'expired'
+            
+            removidos += 1
+            db.commit()
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar vencido {pedido.id}: {e}")
+            erros += 1
+
+    return {
+        "status": "completed", 
+        "total_analisado": len(vencidos),
+        "removidos_sucesso": removidos, 
+        "erros": erros
+    }
