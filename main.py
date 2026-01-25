@@ -3792,7 +3792,7 @@ async def listar_leads(
 # ============================================================
 
 # ============================================================
-# 🔥 ROTA 2: ESTATÍSTICAS DO FUNIL (CONTAGEM ÚNICA DE PESSOAS)
+# 🔥 ROTA 2: ESTATÍSTICAS DO FUNIL (DEDUPLICAÇÃO VIA PYTHON)
 # ============================================================
 @app.get("/api/admin/contacts/funnel-stats")
 async def obter_estatisticas_funil(
@@ -3801,55 +3801,67 @@ async def obter_estatisticas_funil(
     current_user: User = Depends(get_current_user)
 ):
     """
-    🔥 [CORRIGIDO] Retorna estatísticas baseadas em PESSOAS ÚNICAS.
-    Resolve o problema de mostrar '9' vendas quando são apenas '3' clientes recorrentes.
+    🔥 [CORREÇÃO FINAL] Conta usuários únicos processando em Python.
+    Garante que o número bata exatamente com o visual da tabela.
     """
     try:
         user_bot_ids = [bot.id for bot in current_user.bots]
         if not user_bot_ids:
             return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
 
+        # Validação de segurança
         if bot_id and bot_id not in user_bot_ids:
              return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
 
         bots_alvo = [bot_id] if bot_id else user_bot_ids
 
+        # ---------------------------------------------------------
+        # HELPER: CONTA IDS ÚNICOS DE UMA LISTA BRUTA
+        # ---------------------------------------------------------
+        def contar_unicos(lista_tuplas):
+            # Recebe [(123,), ('123 ',), (123,)] e retorna 1
+            ids_limpos = set()
+            for item in lista_tuplas:
+                if item[0]: # Se o ID não for None
+                    # Converte pra string e remove espaços
+                    ids_limpos.add(str(item[0]).strip())
+            return len(ids_limpos)
+
         # ============================================================
-        # 1. TOPO: LEADS ÚNICOS
+        # 1. TOPO: LEADS ÚNICOS (Busca IDs e conta no Python)
         # ============================================================
-        # Conta quantos user_id únicos existem na tabela Leads para esses bots
-        topo = db.query(func.count(func.distinct(Lead.user_id)))\
-                 .filter(Lead.bot_id.in_(bots_alvo))\
-                 .scalar() or 0
+        raw_topo = db.query(Lead.user_id).filter(Lead.bot_id.in_(bots_alvo)).all()
+        topo = contar_unicos(raw_topo)
         
         # ============================================================
-        # 2. MEIO: PENDING (PESSOAS ÚNICAS)
+        # 2. MEIO: PENDING (Busca IDs e conta no Python)
         # ============================================================
-        meio = db.query(func.count(func.distinct(Pedido.telegram_id)))\
-                 .filter(
-                     Pedido.status == 'pending',
-                     Pedido.bot_id.in_(bots_alvo)
-                 ).scalar() or 0
+        raw_meio = db.query(Pedido.telegram_id).filter(
+            Pedido.status == 'pending',
+            Pedido.bot_id.in_(bots_alvo)
+        ).all()
+        meio = contar_unicos(raw_meio)
         
         # ============================================================
-        # 3. FUNDO: PAGANTES (PESSOAS ÚNICAS - A CORREÇÃO DO "9 vs 3")
+        # 3. FUNDO: PAGANTES (Busca IDs e conta no Python)
         # ============================================================
-        # Aqui estava o erro! Agora conta distinct(telegram_id)
-        fundo = db.query(func.count(func.distinct(Pedido.telegram_id)))\
-                  .filter(
-                      Pedido.status.in_(['paid', 'active', 'approved']),
-                      Pedido.bot_id.in_(bots_alvo)
-                  ).scalar() or 0
+        raw_fundo = db.query(Pedido.telegram_id).filter(
+            Pedido.status.in_(['paid', 'active', 'approved']),
+            Pedido.bot_id.in_(bots_alvo)
+        ).all()
+        fundo = contar_unicos(raw_fundo)
         
         # ============================================================
-        # 4. EXPIRADOS (PESSOAS ÚNICAS)
+        # 4. EXPIRADOS (Busca IDs e conta no Python)
         # ============================================================
-        expirados = db.query(func.count(func.distinct(Pedido.telegram_id)))\
-                      .filter(
-                          Pedido.status == 'expired',
-                          Pedido.bot_id.in_(bots_alvo)
-                      ).scalar() or 0
+        raw_expirados = db.query(Pedido.telegram_id).filter(
+            Pedido.status == 'expired',
+            Pedido.bot_id.in_(bots_alvo)
+        ).all()
+        expirados = contar_unicos(raw_expirados)
         
+        # O Total deve ser a soma dos unicos em cada etapa, ou unicos gerais?
+        # Geralmente em funil é a soma das etapas:
         total = topo + meio + fundo + expirados
         
         return {
@@ -3862,10 +3874,9 @@ async def obter_estatisticas_funil(
     
     except Exception as e:
         logger.error(f"Erro ao obter estatísticas do funil: {str(e)}")
-        # Em caso de erro, retorna zero para não travar o dashboard
         return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
 
-
+        
 # ============================================================
 # ROTA 3: ATUALIZAR ROTA DE CONTATOS EXISTENTE
 # ============================================================
