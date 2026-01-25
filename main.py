@@ -3697,7 +3697,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
 # ============================================================
-# ROTA 1: LISTAR LEADS (TOPO DO FUNIL) - VERSÃO DEDUPLICADA
+# ROTA 1: LISTAR LEADS (VERSÃO PÓS-LIMPEZA)
 # ============================================================
 @app.get("/api/admin/leads")
 async def listar_leads(
@@ -3707,70 +3707,49 @@ async def listar_leads(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Lista leads únicos. Se o usuário entrou 10 vezes no bot, 
-    mostra apenas a última vez (mais recente).
-    """
     try:
-        # 1. Identifica os Bots do Usuário
         user_bot_ids = [bot.id for bot in current_user.bots]
-        
-        # Se conta nova (sem bots), retorna vazio
         if not user_bot_ids:
             return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        # 2. Define Bots Alvo
-        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
+        # Query Base
+        query = db.query(Lead)
 
-        # 3. BUSCA BRUTA (SEM LIMIT/OFFSET NO SQL)
-        # Trazemos tudo ordenado do mais recente para o mais antigo.
-        # Isso é essencial para que a deduplicação mantenha o registro mais novo.
-        raw_leads = db.query(Lead).filter(
-            Lead.bot_id.in_(bots_alvo)
-        ).order_by(Lead.created_at.desc()).all()
+        # Filtros
+        if bot_id:
+            if bot_id not in user_bot_ids:
+                return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+            query = query.filter(Lead.bot_id == bot_id)
+        else:
+            query = query.filter(Lead.bot_id.in_(user_bot_ids))
         
-        # 4. LÓGICA DE DEDUPLICAÇÃO (O "LIQUIDIFICADOR") 🌪️
-        leads_unicos = {}
+        # Ordenação Simples (Mais novos primeiro)
+        query = query.order_by(Lead.created_at.desc())
         
-        for lead in raw_leads:
-            # Normaliza o ID
-            tid = str(lead.user_id).strip()
-            # Chave única: Bot + Usuário
-            key = f"{lead.bot_id}_{tid}"
-            
-            # Se essa chave AINDA NÃO existe no dicionário, adicionamos.
-            # Como a lista está ordenada por Data DESC, o primeiro que aparece é o mais novo.
-            # Os próximos (mais velhos) serão ignorados pelo 'if key not in leads_unicos'.
-            if key not in leads_unicos:
-                leads_unicos[key] = {
-                    "id": lead.id,
-                    "user_id": tid,
-                    "nome": lead.nome,
-                    "username": lead.username,
-                    "bot_id": lead.bot_id,
-                    "status": lead.status,
-                    "funil_stage": lead.funil_stage,
-                    "primeiro_contato": lead.primeiro_contato.isoformat() if lead.primeiro_contato else None,
-                    "ultimo_contato": lead.ultimo_contato.isoformat() if lead.ultimo_contato else None,
-                    "total_remarketings": lead.total_remarketings,
-                    "ultimo_remarketing": lead.ultimo_remarketing.isoformat() if lead.ultimo_remarketing else None,
-                    "created_at": lead.created_at.isoformat() if lead.created_at else None
-                }
+        # Paginação SQL Direta (Agora segura pois removemos duplicatas fisicamente)
+        total = query.count()
+        offset = (page - 1) * per_page
+        leads = query.offset(offset).limit(per_page).all()
         
-        # 5. PAGINAÇÃO MANUAL (NA LISTA LIMPA)
-        # Transforma o dicionário em lista
-        lista_final = list(leads_unicos.values())
-        
-        # Totais reais (sem duplicatas)
-        total = len(lista_final)
-        
-        # Recorte da página
-        start = (page - 1) * per_page
-        end = start + per_page
-        paginated_data = lista_final[start:end]
+        # Formata resposta
+        leads_data = []
+        for lead in leads:
+            leads_data.append({
+                "id": lead.id,
+                "user_id": lead.user_id,
+                "nome": lead.nome or "Sem nome",
+                "username": lead.username,
+                "bot_id": lead.bot_id,
+                "status": lead.status,
+                "funil_stage": lead.funil_stage,
+                "primeiro_contato": lead.primeiro_contato.isoformat() if lead.primeiro_contato else None,
+                "created_at": lead.created_at.isoformat() if lead.created_at else None,
+                 # Adicionei expiração para garantir que venha tudo
+                "expiration_date": lead.expiration_date.isoformat() if getattr(lead, 'expiration_date', None) else None 
+            })
         
         return {
-            "data": paginated_data,
+            "data": leads_data,
             "total": total,
             "page": page,
             "per_page": per_page,
@@ -3779,7 +3758,6 @@ async def listar_leads(
     
     except Exception as e:
         logger.error(f"Erro ao listar leads: {str(e)}")
-        # Retorna lista vazia para não quebrar o front
         return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
 # ============================================================
@@ -3876,7 +3854,7 @@ async def obter_estatisticas_funil(
         logger.error(f"Erro ao obter estatísticas do funil: {str(e)}")
         return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
 
-        
+
 # ============================================================
 # ROTA 3: ATUALIZAR ROTA DE CONTATOS EXISTENTE
 # ============================================================
@@ -6844,6 +6822,59 @@ def fix_database_structure(db: Session = Depends(get_db)):
             "status": "sucesso", 
             "msg": "✅ Colunas 'phone' e 'expiration_date' criadas com sucesso na tabela LEADS!"
         }
+    except Exception as e:
+        db.rollback()
+        return {"status": "erro", "msg": str(e)}
+
+# =========================================================
+# 🧹 FAXINA NUCLEAR: APAGA LEADS DUPLICADOS DO BANCO
+# =========================================================
+@app.get("/api/admin/nuke-duplicate-leads")
+def nuke_duplicate_leads(db: Session = Depends(get_db)):
+    """
+    ⚠️ PERIGO: Esta rota APAGA fisicamente registros duplicados da tabela LEADS.
+    Mantém apenas o registro mais recente de cada usuário por bot.
+    """
+    try:
+        # 1. Busca TODOS os leads de TODOS os bots
+        all_leads = db.query(Lead).order_by(Lead.created_at.desc()).all()
+        
+        unicos = {}
+        ids_para_deletar = []
+        
+        # 2. Identifica quem deve morrer 💀
+        for lead in all_leads:
+            # Limpeza agressiva do ID
+            tid = str(lead.user_id).strip().replace(" ", "")
+            chave = f"{lead.bot_id}_{tid}"
+            
+            if chave not in unicos:
+                # Primeiro que aparece é o mais novo (por causa do order_by desc)
+                # Esse SOBREVIVE
+                unicos[chave] = lead.id
+            else:
+                # Se já vimos essa chave, é uma duplicata mais antiga.
+                # Esse MORRE
+                ids_para_deletar.append(lead.id)
+        
+        # 3. Execução em massa
+        if ids_para_deletar:
+            # Deleta em lotes para não travar o banco
+            chunk_size = 100
+            for i in range(0, len(ids_para_deletar), chunk_size):
+                chunk = ids_para_deletar[i:i + chunk_size]
+                db.query(Lead).filter(Lead.id.in_(chunk)).delete(synchronize_session=False)
+            
+            db.commit()
+            
+        return {
+            "status": "sucesso", 
+            "total_analisado": len(all_leads),
+            "unicos_mantidos": len(unicos),
+            "lixo_deletado": len(ids_para_deletar),
+            "msg": f"✅ {len(ids_para_deletar)} Leads duplicados foram apagados do banco de dados."
+        }
+        
     except Exception as e:
         db.rollback()
         return {"status": "erro", "msg": str(e)}
