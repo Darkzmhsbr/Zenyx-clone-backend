@@ -1389,18 +1389,6 @@ class UserUpdate(BaseModel):
 # =========================================================
 # 💰 ROTA DE PAGAMENTO (PIX) - CRÍTICO PARA O MINI APP
 # =========================================================
-
-# Modelo de dados recebido do Frontend
-class PixCreateRequest(BaseModel):
-    bot_id: int
-    plano_id: int
-    plano_nome: str
-    valor: float
-    telegram_id: str
-    first_name: str
-    username: str
-    tem_order_bump: bool = False
-
 # =========================================================
 # 1. GERAÇÃO DE PIX (COM SPLIT E WEBHOOK CORRIGIDO)
 # =========================================================
@@ -1418,7 +1406,7 @@ class PixCreateRequest(BaseModel):
     tem_order_bump: Optional[bool] = False
 
 # =========================================================
-# 💰 2. GERAÇÃO DE PIX (COM SPLIT RIGOROSO E LOGS DE DEBUG)
+# 💰 2. GERAÇÃO DE PIX (COM CORREÇÃO DE SPLIT E BLINDAGEM)
 # =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
@@ -1430,14 +1418,20 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         if not bot_atual:
             raise HTTPException(status_code=404, detail="Bot não encontrado")
 
-        # 2. Definir Token do Vendedor (Dono do Bot)
-        # Prioridade: Token no Bot > Token na Config do Sistema > Env
+        # 2. Definir Token do Vendedor e ID da Plataforma
+        # 🔥 SEU ID DA PUSHIN PAY (CONTA DA PLATAFORMA - FIXO)
+        PLATAFORMA_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        
+        # Busca config do sistema para fallback
+        config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
+        token_plataforma = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
+
+        # Define qual token usar (do Bot ou da Plataforma)
         pushin_token = bot_atual.pushin_token 
         if not pushin_token:
-            config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
-            pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
+            pushin_token = token_plataforma
 
-        # Tratamento de ID de usuário
+        # Tratamento de ID de usuário (Telegram)
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
         tid_clean = str(data.telegram_id).strip()
         if not tid_clean.isdigit(): tid_clean = user_clean
@@ -1472,9 +1466,6 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         # 💸 LÓGICA DE SPLIT (SEPARAÇÃO DO DINHEIRO)
         # ======================================================================
         
-        # 🔥 SEU ID DA PUSHIN PAY (CONTA DA PLATAFORMA)
-        PLATAFORMA_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
-        
         # Busca o Membro Dono do Bot
         membro_dono = None
         if bot_atual.owner_id:
@@ -1485,37 +1476,50 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         if membro_dono and hasattr(membro_dono, 'taxa_venda') and membro_dono.taxa_venda:
             taxa_centavos = int(membro_dono.taxa_venda)
 
-        # Regra de Segurança: Não cobrar taxa se for > 50% do valor (Regra Pushin)
+        # --- CORREÇÃO DO ID DO CLIENTE (O PULO DO GATO) ---
+        cliente_pushin_id = None
+        
+        if membro_dono:
+            # 1. Tenta pegar do banco
+            cliente_pushin_id = membro_dono.pushin_pay_id
+            
+            # 2. Se não tiver no banco, mas o token for da plataforma, assume que é você (Admin)
+            if not cliente_pushin_id and pushin_token == token_plataforma:
+                cliente_pushin_id = PLATAFORMA_ID
+                logger.info("ℹ️ ID do cliente não encontrado, usando ID da Plataforma (Admin).")
+
+        # --- APLICAÇÃO DAS REGRAS ---
+        
+        # Regra 1: Taxa muito alta (>50%)
         if taxa_centavos >= (valor_total_centavos * 0.5):
             logger.warning(f"⚠️ Taxa ({taxa_centavos}) muito alta para o valor ({valor_total_centavos}). Split cancelado.")
         
-        # Verifica se o Dono tem ID configurado para receber o resto
-        elif membro_dono and membro_dono.pushin_pay_id:
+        # Regra 2: Se Cliente e Plataforma são a mesma conta (Auto-venda do Admin)
+        elif cliente_pushin_id == PLATAFORMA_ID:
+            logger.info("ℹ️ Venda do Admin para Admin (Mesma conta). Split ignorado para evitar erro.")
+            # Não adiciona split_rules, vai 100% para o dono do token (que é você)
             
-            # Evita split para a mesma conta (Se você for o dono do bot de teste)
-            if membro_dono.pushin_pay_id == PLATAFORMA_ID:
-                logger.info("ℹ️ Dono do bot é a própria Plataforma. Split desnecessário.")
-            else:
-                # MONTA O SPLIT CONFORME DOCUMENTAÇÃO
-                payload["split"] = [
-                    {
-                        "recipient_id": PLATAFORMA_ID,    # VOCÊ (R$ 0,60)
-                        "amount": taxa_centavos,
-                        "liable": True,
-                        "charge_processing_fee": False    # Você NÃO paga a taxa do PIX
-                    },
-                    {
-                        "recipient_id": membro_dono.pushin_pay_id, # CLIENTE (Resto)
-                        "remainder": True,                # Recebe todo o resto
-                        "liable": True,
-                        "charge_processing_fee": True     # Cliente paga a taxa do PIX
-                    }
-                ]
-                logger.info(f"✅ SPLIT ATIVADO: Admin ganha R$ {taxa_centavos/100:.2f} | Cliente: {membro_dono.pushin_pay_id}")
+        # Regra 3: Cliente tem conta diferente -> APLICA O SPLIT
+        elif cliente_pushin_id:
+            payload["split"] = [
+                {
+                    "recipient_id": PLATAFORMA_ID,    # VOCÊ (R$ 0,60)
+                    "amount": taxa_centavos,
+                    "liable": True,
+                    "charge_processing_fee": False    # Você NÃO paga a taxa do PIX
+                },
+                {
+                    "recipient_id": cliente_pushin_id, # CLIENTE (Resto)
+                    "remainder": True,                 # Recebe todo o resto
+                    "liable": True,
+                    "charge_processing_fee": True      # Cliente paga a taxa do PIX
+                }
+            ]
+            logger.info(f"✅ SPLIT ATIVADO: Admin ganha R$ {taxa_centavos/100:.2f} | Cliente: {cliente_pushin_id}")
         
         else:
-            # LOG DE ALERTA: ISSO AVISA SE O CLIENTE NÃO TIVER CONTA CONFIGURADA
-            logger.error("❌ ERRO SPLIT: O Dono do Bot não tem 'pushin_pay_id' salvo no banco 'users'. O valor irá 100% para o token informado.")
+            # Se chegou aqui, é um cliente sem ID configurado e não é o Admin
+            logger.error("❌ ERRO SPLIT: O Dono do Bot não tem 'pushin_pay_id' salvo. Gerando sem split.")
 
         # ======================================================================
 
