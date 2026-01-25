@@ -1753,6 +1753,34 @@ def criar_bot(
         db.commit()
         db.refresh(novo_bot)
         
+        # ==============================================================================
+        # 🔌 CONEXÃO COM TELEGRAM (TEM QUE SER AQUI, ANTES DO RETURN!)
+        # ==============================================================================
+        try:
+            # 1. Define a URL (Já com a correção do 'v1' forçada)
+            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testesv1-production.up.railway.app")
+            
+            # Tratamento de string para evitar erros de URL
+            if public_url.startswith("https://"):
+                public_url = public_url.replace("https://", "")
+            if public_url.endswith("/"):
+                public_url = public_url[:-1]
+
+            webhook_url = f"https://{public_url}/webhook/{novo_bot.token}"
+            
+            # 2. Conecta na API do Telegram e define o Webhook
+            bot_telegram = telebot.TeleBot(novo_bot.token)
+            bot_telegram.remove_webhook() # Limpa anterior por garantia
+            time.sleep(0.5) # Respiro para a API
+            bot_telegram.set_webhook(url=webhook_url)
+            
+            logger.info(f"🔗 Webhook definido com sucesso: {webhook_url}")
+
+        except Exception as e_telegram:
+            # Não vamos travar a criação se der erro no Telegram, mas vamos logar FEIO
+            logger.error(f"❌ CRÍTICO: Bot criado no banco, mas falha ao definir Webhook: {e_telegram}")
+        # ==============================================================================
+
         # 📋 AUDITORIA: Bot criado
         log_action(
             db=db,
@@ -1772,6 +1800,8 @@ def criar_bot(
         )
         
         logger.info(f"✅ Bot criado: {novo_bot.nome} (ID: {novo_bot.id})")
+        
+        # 🏁 RETORNO DE SUCESSO (SÓ AGORA!)
         return {"id": novo_bot.id, "nome": novo_bot.nome, "status": "criado", "has_bots": True}
 
     except IntegrityError as e:
@@ -1788,15 +1818,10 @@ def criar_bot(
             # Se o bot existe E É DO MESMO DONO (o usuário atual)
             if bot_existente and bot_existente.owner_id == current_user.id:
                 logger.info(f"🔄 Recuperando bot ID {bot_existente.id} para destravar fluxo.")
-                
-                # RETORNA SUCESSO (200) COM O ID EXISTENTE + CHAVE ONBOARDING
                 return {"id": bot_existente.id, "nome": bot_existente.nome, "status": "recuperado", "has_bots": True}
-            
             else:
-                # Se o token já existe mas é de OUTRA pessoa
                 raise HTTPException(status_code=409, detail="Este token já pertence a outro usuário.")
         
-        # Outros erros de integridade
         logger.error(f"Erro de integridade não tratado: {e}")
         raise HTTPException(status_code=400, detail="Erro de dados ao criar bot.")
 
@@ -6248,7 +6273,7 @@ def get_tutorials(current_user = Depends(get_current_user)):
             "content": "Na última mensagem do seu fluxo, ative 'Mostrar planos junto com essa mensagem' para habilitar o pagamento automático."
         }
     ]
-    
+
 # =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
 # =========================================================
