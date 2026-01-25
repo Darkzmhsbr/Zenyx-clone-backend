@@ -1602,13 +1602,15 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         expires_delta=access_token_expires
     )
     
+    # 🚀 RETORNO CORRIGIDO: Adicionado 'has_bots' para cumprir o contrato do Onboarding
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "user_id": new_user.id,
-        "username": new_user.username
+        "username": new_user.username,
+        "has_bots": False # Um novo usuário nunca tem bots ao se registrar
     }
-
+    
 @app.post("/api/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     from database import User
