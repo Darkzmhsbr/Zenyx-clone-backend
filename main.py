@@ -1408,6 +1408,9 @@ class PixCreateRequest(BaseModel):
 # =========================================================
 # 💰 2. GERAÇÃO DE PIX (COM SPLIT FORÇADO SEMPRE)
 # =========================================================
+# =========================================================
+# 💰 2. GERAÇÃO DE PIX (SINTAXE ANTIGA: SPLIT_RULES)
+# =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
@@ -1419,6 +1422,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Bot não encontrado")
 
         # 2. Definir Token e ID da Plataforma
+        # 🔥 SEU ID FIXO (Como no arquivo antigo)
         PLATAFORMA_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
         
         config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
@@ -1459,10 +1463,9 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         }
 
         # ======================================================================
-        # 💸 LÓGICA DE SPLIT (SEM TRAVA DE SEGURANÇA)
+        # 💸 LÓGICA DE SPLIT (SINTAXE CORRIGIDA - IGUAL MAIN 9)
         # ======================================================================
         
-        # Busca o Membro Dono do Bot
         membro_dono = None
         if bot_atual.owner_id:
             membro_dono = db.query(User).filter(User.id == bot_atual.owner_id).first()
@@ -1471,41 +1474,24 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         if membro_dono and hasattr(membro_dono, 'taxa_venda') and membro_dono.taxa_venda:
             taxa_centavos = int(membro_dono.taxa_venda)
 
-        # Determina o ID do Cliente (Quem recebe o resto)
-        cliente_pushin_id = None
-        
-        if membro_dono and membro_dono.pushin_pay_id:
-            cliente_pushin_id = membro_dono.pushin_pay_id
-        elif pushin_token == token_plataforma:
-            # Fallback: Se não tem ID no banco, mas o token é seu, usa seu ID
-            cliente_pushin_id = PLATAFORMA_ID
-
-        # --- APLICAÇÃO DO SPLIT ---
+        # Regra: Taxa muito alta (>50%)
         if taxa_centavos >= (valor_total_centavos * 0.5):
-            logger.warning("⚠️ Taxa muito alta. Split cancelado.")
-        
-        elif cliente_pushin_id:
-            # 🔥 REMOVIDA A TRAVA QUE IMPEDIA SPLIT PARA A MESMA CONTA
-            # Agora ele vai tentar fazer o split mesmo se cliente_id == plataforma_id
-            
-            payload["split"] = [
-                {
-                    "recipient_id": PLATAFORMA_ID,    # VOCÊ (R$ 0,60)
-                    "amount": taxa_centavos,
-                    "liable": True,
-                    "charge_processing_fee": False    
-                },
-                {
-                    "recipient_id": cliente_pushin_id, # CLIENTE (Resto)
-                    "remainder": True,                
-                    "liable": True,
-                    "charge_processing_fee": True     
-                }
-            ]
-            logger.info(f"✅ SPLIT FORÇADO: Admin R$ {taxa_centavos/100:.2f} | Cliente: {cliente_pushin_id}")
+            logger.warning(f"⚠️ Taxa muito alta. Split cancelado.")
         
         else:
-            logger.error("❌ Não foi possível identificar a conta do cliente para o Split.")
+            # 🔥 AQUI ESTÁ A CORREÇÃO CRUCIAL 🔥
+            # Usando "split_rules" e "account_id" (Sintaxe do arquivo antigo)
+            payload["split_rules"] = [
+                {
+                    "value": taxa_centavos,        # Sintaxe antiga usa 'value', nova usa 'amount'
+                    "account_id": PLATAFORMA_ID,   # Sintaxe antiga usa 'account_id', nova usa 'recipient_id'
+                    "charge_processing_fee": False # Você não paga a taxa
+                }
+            ]
+            # Nota: Na sintaxe antiga, não precisava declarar o "remainder". 
+            # O sistema enviava o resto automaticamente para o dono do Token.
+            
+            logger.info(f"✅ SPLIT (split_rules): Admin R$ {taxa_centavos/100:.2f} -> Conta {PLATAFORMA_ID}")
 
         # ======================================================================
 
