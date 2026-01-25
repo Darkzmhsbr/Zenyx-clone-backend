@@ -2555,30 +2555,56 @@ def salvar_fluxo(
 
 # --- 1. PASTAS (FOLDERS) ---
 
+# =========================================================
+# 🎯 RASTREAMENTO (TRACKING) - CORRIGIDO (SEM OWNER_ID)
+# =========================================================
+
+# --- 1. PASTAS (FOLDERS) ---
+
 @app.get("/api/admin/tracking/folders")
 async def list_tracking_folders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Lista pastas APENAS do usuário logado (owner_id).
-    Mantém as estatísticas para o Frontend funcionar.
+    Lista pastas baseada nos links dos bots do usuário.
+    (Compatível com banco de dados atual sem coluna owner_id)
     """
     try:
-        # 🔥 BLINDAGEM: Busca apenas pastas onde o DONO é o usuário atual
-        # Ignora bots, foca no dono da conta.
+        # 1. Pega IDs dos bots do usuário
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        # Se não tem bots, não tem como ter links/pastas visíveis
+        if not user_bot_ids:
+            return []
+        
+        # 2. Busca IDs das pastas que contêm links desses bots
+        # Isso garante que o usuário só vê pastas que ele "usa"
+        folder_ids_query = db.query(TrackingLink.folder_id).filter(
+            TrackingLink.bot_id.in_(user_bot_ids)
+        ).distinct()
+        
+        folder_ids = [f[0] for f in folder_ids_query.all()]
+        
+        if not folder_ids:
+            return []
+
+        # 3. Busca as pastas e monta estatísticas
         folders = db.query(TrackingFolder).filter(
-            TrackingFolder.owner_id == current_user.id
+            TrackingFolder.id.in_(folder_ids)
         ).order_by(desc(TrackingFolder.created_at)).all()
         
         result = []
         for f in folders:
-            # Calcula estatísticas dos links dentro da pasta
+            # Estatísticas filtradas (só conta cliques/links DO USUÁRIO naquela pasta)
             stats = db.query(
                 func.count(TrackingLink.id).label('link_count'),
                 func.sum(TrackingLink.clicks).label('total_clicks'),
                 func.sum(TrackingLink.vendas).label('total_vendas')
-            ).filter(TrackingLink.folder_id == f.id).first()
+            ).filter(
+                TrackingLink.folder_id == f.id,
+                TrackingLink.bot_id.in_(user_bot_ids) # 🔥 Filtro crucial
+            ).first()
             
             result.append({
                 "id": f.id, 
@@ -2590,12 +2616,12 @@ async def list_tracking_folders(
                 "created_at": f.created_at
             })
         
-        logger.info(f"📂 Usuário {current_user.username} vê {len(result)} pastas (Blindado)")
+        logger.info(f"📂 Usuário {current_user.username} vê {len(result)} pastas")
         return result
         
     except Exception as e:
         logger.error(f"Erro ao listar pastas: {e}")
-        return []
+        return [] 
 
 @app.post("/api/admin/tracking/folders")
 async def create_tracking_folder(
@@ -2604,22 +2630,25 @@ async def create_tracking_folder(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Cria uma nova pasta vinculada EXCLUSIVAMENTE ao usuário logado.
+    Cria uma nova pasta.
+    NOTA: Como o banco não tem owner_id, a pasta é criada 'sem dono'.
+    Ela só aparecerá na lista quando você criar um link dentro dela.
     """
     try:
-        # Verifica se já existe pasta com esse nome para ESSE usuário
+        # Verifica duplicidade simples
         existe = db.query(TrackingFolder).filter(
-            TrackingFolder.owner_id == current_user.id,
             func.lower(TrackingFolder.nome) == dados.nome.lower()
         ).first()
         
         if existe:
-            raise HTTPException(status_code=400, detail="Você já tem uma pasta com esse nome.")
+            # Permite criar com mesmo nome se for uso compartilhado, 
+            # mas idealmente avisamos. Aqui retornamos a existente para não travar.
+            return {"status": "ok", "id": existe.id, "msg": "Pasta já existia"}
 
         nova_pasta = TrackingFolder(
             nome=dados.nome, 
-            plataforma=dados.plataforma,
-            owner_id=current_user.id # 🔥 VINCULA AO DONO (CRÍTICO)
+            plataforma=dados.plataforma
+            # SEM owner_id POIS A COLUNA NÃO EXISTE
         )
         db.add(nova_pasta)
         db.commit()
@@ -2628,42 +2657,46 @@ async def create_tracking_folder(
         logger.info(f"📁 Pasta '{dados.nome}' criada por {current_user.username}")
         return {"status": "ok", "id": nova_pasta.id}
         
-    except HTTPException as he:
-        raise he
     except Exception as e:
         logger.error(f"Erro ao criar pasta: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
 
 @app.delete("/api/admin/tracking/folders/{fid}")
-async def delete_folder(
+async def delete_tracking_folder(
     fid: int, 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Deleta uma pasta (apenas se pertencer ao usuário).
+    Deleta pasta (Apenas se TODOS os links dentro dela forem do usuário)
     """
     try:
-        # Busca pasta garantindo que é do usuário
-        folder = db.query(TrackingFolder).filter(
-            TrackingFolder.id == fid,
-            TrackingFolder.owner_id == current_user.id
-        ).first()
+        user_bot_ids = [bot.id for bot in current_user.bots]
         
+        folder = db.query(TrackingFolder).filter(TrackingFolder.id == fid).first()
         if not folder:
-            raise HTTPException(status_code=404, detail="Pasta não encontrada ou acesso negado.")
+            raise HTTPException(404, "Pasta não encontrada")
         
-        # Opcional: Deletar links dentro dela antes
-        db.query(TrackingLink).filter(TrackingLink.folder_id == folder.id).delete()
+        # Verifica links de OUTROS usuários
+        links_outros = db.query(TrackingLink).filter(
+            TrackingLink.folder_id == fid,
+            TrackingLink.bot_id.notin_(user_bot_ids)
+        ).count()
         
+        if links_outros > 0:
+            raise HTTPException(403, "Você não pode deletar esta pasta pois ela contém links de outros usuários.")
+        
+        # Se só tem links meus (ou está vazia), deleta
+        db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
         db.delete(folder)
         db.commit()
         
-        logger.info(f"🗑️ Pasta {fid} deletada por {current_user.username}")
         return {"status": "deleted"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Erro ao deletar pasta: {e}")
-        raise HTTPException(status_code=500, detail="Erro ao deletar pasta")
+        raise HTTPException(500, "Erro interno")
 
 # --- 2. LINKS DE RASTREAMENTO ---
 
@@ -2674,21 +2707,15 @@ async def list_tracking_links(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Lista links de uma pasta - VERIFICA SE A PASTA É DO USUÁRIO
+    Lista APENAS os links que pertencem aos bots do usuário.
     """
-    # 1. Verifica se a pasta pertence ao usuário
-    folder = db.query(TrackingFolder).filter(
-        TrackingFolder.id == folder_id,
-        TrackingFolder.owner_id == current_user.id
-    ).first()
-    
-    if not folder:
-        # Se a pasta não é sua, retorna vazio (blindagem)
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    if not user_bot_ids:
         return []
     
-    # 2. Retorna links
     return db.query(TrackingLink).filter(
-        TrackingLink.folder_id == folder_id
+        TrackingLink.folder_id == folder_id,
+        TrackingLink.bot_id.in_(user_bot_ids) # 🔥 BLINDAGEM
     ).order_by(desc(TrackingLink.created_at)).all()
 
 @app.post("/api/admin/tracking/links")
@@ -2698,17 +2725,13 @@ async def create_tracking_link(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Cria link de rastreamento.
+    Cria link validando se o Bot pertence ao usuário.
     """
     try:
-        # 1. Verifica se a pasta pertence ao usuário
-        folder = db.query(TrackingFolder).filter(
-            TrackingFolder.id == dados.folder_id,
-            TrackingFolder.owner_id == current_user.id
-        ).first()
-        
-        if not folder:
-            raise HTTPException(403, "Pasta inválida ou acesso negado.")
+        # 1. Validação de Propriedade do Bot
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        if dados.bot_id not in user_bot_ids:
+            raise HTTPException(403, "Você não tem permissão para criar links neste bot.")
 
         # 2. Gera código único
         if not dados.codigo:
@@ -2716,10 +2739,9 @@ async def create_tracking_link(
             chars = string.ascii_lowercase + string.digits
             dados.codigo = ''.join(random.choice(chars) for _ in range(8))
         
-        # Verifica duplicidade global
         exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
         if exists:
-            raise HTTPException(400, "Este código já existe. Tente outro.")
+            raise HTTPException(400, "Este código já existe.")
 
         # 3. Cria Link
         novo_link = TrackingLink(
@@ -2752,23 +2774,21 @@ async def delete_link(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Deleta link - Garante que está numa pasta do usuário
+    Deleta link validando propriedade.
     """
-    # Join com Folder para garantir ownership
-    link = db.query(TrackingLink).join(TrackingFolder).filter(
-        TrackingLink.id == lid,
-        TrackingFolder.owner_id == current_user.id
-    ).first()
+    user_bot_ids = [bot.id for bot in current_user.bots]
     
+    link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
     if not link:
         raise HTTPException(404, "Link não encontrado")
     
+    if link.bot_id not in user_bot_ids:
+        raise HTTPException(403, "Acesso negado")
+    
     db.delete(link)
     db.commit()
-    
-    logger.info(f"🗑️ Link {lid} deletado por {current_user.username}")
     return {"status": "deleted"}
-
+    
 # =========================================================
 # 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
 # =========================================================
