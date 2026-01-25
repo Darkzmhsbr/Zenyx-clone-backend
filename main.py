@@ -6124,6 +6124,10 @@ def mark_one_read(
 # ENDPOINTS PÚBLICOS PARA LANDING PAGE
 # ========================================================================
 
+# ========================================================================
+# ENDPOINTS PÚBLICOS PARA LANDING PAGE - CORRIGIDOS
+# ========================================================================
+
 @app.get("/api/public/activity-feed")
 def get_public_activity_feed(db: Session = Depends(get_db)):
     """
@@ -6131,6 +6135,9 @@ def get_public_activity_feed(db: Session = Depends(get_db)):
     SEM dados sensíveis (IDs de telegram ocultos, nomes parciais)
     """
     try:
+        # Import local para evitar erro de referência circular ou 'not defined'
+        from database import Pedido
+        
         # Busca últimos 20 pedidos aprovados usando ORM
         pedidos = db.query(Pedido).filter(
             Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
@@ -6159,7 +6166,7 @@ def get_public_activity_feed(db: Session = Depends(get_db)):
             
             activities.append({
                 "name": name,
-                "plan": row.plano_nome,
+                "plan": row.plano_nome or "Plano VIP",
                 "price": float(row.valor) if row.valor else 0.0,
                 "action": action,
                 "icon": icon,
@@ -6169,8 +6176,7 @@ def get_public_activity_feed(db: Session = Depends(get_db)):
         return {"activities": activities}
         
     except Exception as e:
-        logger.error(f"Erro ao buscar feed de atividades: {e}")
-        # Retorna lista vazia ou mock em caso de erro para não quebrar a home
+        logger.error(f"❌ Erro ao buscar feed de atividades: {e}")
         return {"activities": []}
 
 @app.get("/api/public/stats")
@@ -6179,6 +6185,9 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
     Retorna estatísticas gerais da plataforma (números públicos)
     """
     try:
+        # Import local para garantir acesso aos modelos
+        from database import Bot, Pedido
+        
         # Conta total de bots criados (Ativos)
         total_bots = db.query(Bot).filter(Bot.status == 'ativo').count()
         
@@ -6205,7 +6214,7 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
         }
         
     except Exception as e:
-        logger.error(f"Erro ao buscar estatísticas públicas: {e}")
+        logger.error(f"❌ Erro ao buscar estatísticas públicas: {e}")
         return {
             "total_bots": 0,
             "total_sales": 0,
