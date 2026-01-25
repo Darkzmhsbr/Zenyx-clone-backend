@@ -6354,93 +6354,6 @@ def limpar_leads_que_viraram_pedidos(db: Session = Depends(get_db)):
         return {"status": "error", "mensagem": str(e)}
 
 # =========================================================
-# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
-# =========================================================
-@app.get("/api/admin/fix-account-emergency")
-def fix_admin_account_emergency(db: Session = Depends(get_db)):
-    try:
-        # SEU ID DA PUSHIN PAY (FIXO)
-        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
-        USERNAME_ALVO = "AdminZenyx" 
-        
-        # 1. Tenta achar o usuário
-        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
-        
-        if user:
-            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
-            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
-            
-            user.pushin_pay_id = MY_PUSHIN_ID
-            user.is_superuser = True
-            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
-            
-            db.commit()
-            return {
-                "status": "restored", 
-                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
-                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
-            }
-        
-        else:
-            # CENÁRIO B: Recria o usuário (Sem o campo role)
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            hashed_password = pwd_context.hash("123456")
-            
-            new_user = User(
-                username=USERNAME_ALVO,
-                email="admin@zenyx.com",
-                hashed_password=hashed_password,
-                is_active=True,
-                is_superuser=True,
-                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
-                pushin_pay_id=MY_PUSHIN_ID,
-                created_at=datetime.utcnow()
-            )
-            db.add(new_user)
-            db.commit()
-            return {
-                "status": "created", 
-                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
-                "info": "Senha temporária: 123456"
-            }
-
-    except Exception as e:
-        return {"status": "error", "msg": str(e)}
-
-# =========================================================
-# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
-# =========================================================
-@app.get("/api/admin/debug-users-list")
-def debug_users_list(db: Session = Depends(get_db)):
-    try:
-        # 1. Conexão
-        db_url = str(engine.url)
-        host_info = db_url.split("@")[-1]
-        
-        # 2. Busca Usuários
-        users = db.query(User).all()
-        
-        lista_users = []
-        for u in users:
-            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
-            # Isso pega apenas as colunas que REALMENTE existem no banco
-            dados_usuario = {}
-            for key, value in u.__dict__.items():
-                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
-                    dados_usuario[key] = value
-            
-            lista_users.append(dados_usuario)
-            
-        return {
-            "CONEXAO": host_info,
-            "TOTAL": len(users),
-            "DADOS_REAIS": lista_users
-        }
-    except Exception as e:
-        return {"erro_fatal": str(e)}
-
-# =========================================================
 # 💀 CRON JOB: REMOVEDOR DE USUÁRIOS VENCIDOS
 # =========================================================
 @app.get("/cron/check-expired")
@@ -6511,6 +6424,132 @@ def cron_check_expired(db: Session = Depends(get_db)):
         "removidos_sucesso": removidos, 
         "erros": erros
     }
+
+# =========================================================
+# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
+# =========================================================
+@app.get("/api/admin/fix-account-emergency")
+def fix_admin_account_emergency(db: Session = Depends(get_db)):
+    try:
+        # SEU ID DA PUSHIN PAY (FIXO)
+        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        USERNAME_ALVO = "AdminZenyx" 
+        
+        # 1. Tenta achar o usuário
+        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
+        
+        if user:
+            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
+            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
+            
+            user.pushin_pay_id = MY_PUSHIN_ID
+            user.is_superuser = True
+            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
+            
+            db.commit()
+            return {
+                "status": "restored", 
+                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
+                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
+            }
+        
+        else:
+            # CENÁRIO B: Recria o usuário (Sem o campo role)
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            hashed_password = pwd_context.hash("123456")
+            
+            new_user = User(
+                username=USERNAME_ALVO,
+                email="admin@zenyx.com",
+                hashed_password=hashed_password,
+                is_active=True,
+                is_superuser=True,
+                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
+                pushin_pay_id=MY_PUSHIN_ID,
+                created_at=datetime.utcnow()
+            )
+            db.add(new_user)
+            db.commit()
+            return {
+                "status": "created", 
+                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
+                "info": "Senha temporária: 123456"
+            }
+
+    except Exception as e:
+        return {"status": "error", "msg": str(e)}
+
+
+# =========================================================
+# 🛠️ FERRAMENTA DE CORREÇÃO RETROATIVA (SEM GASTAR 1 CENTAVO)
+# =========================================================
+@app.get("/api/admin/sync-leads-expiration")
+def sync_leads_expiration(db: Session = Depends(get_db)):
+    try:
+        # 1. Pega todos os pedidos aprovados que têm data de expiração
+        pedidos_validos = db.query(Pedido).filter(
+            Pedido.status.in_(['approved', 'active', 'paid']),
+            Pedido.data_expiracao != None
+        ).order_by(desc(Pedido.created_at)).all()
+
+        atualizados = 0
+
+        for pedido in pedidos_validos:
+            # 2. Busca o Lead correspondente
+            lead = db.query(Lead).filter(
+                Lead.bot_id == pedido.bot_id,
+                Lead.user_id == pedido.telegram_id
+            ).first()
+
+            # 3. Se achou o lead, força a data do pedido nele
+            if lead:
+                # Atualiza a data do Lead para bater com a do Pedido
+                lead.expiration_date = pedido.data_expiracao
+                lead.status = 'active' # Garante que está marcado como ativo
+                atualizados += 1
+
+        db.commit()
+
+        return {
+            "status": "sucesso",
+            "mensagem": f"✅ {atualizados} Contatos foram corrigidos com a data dos Pedidos!",
+            "economia": f"Você economizou {atualizados} testes de R$ 0.30"
+        }
+    except Exception as e:
+        return {"status": "erro", "detalhe": str(e)}
+
+# =========================================================
+# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
+# =========================================================
+@app.get("/api/admin/debug-users-list")
+def debug_users_list(db: Session = Depends(get_db)):
+    try:
+        # 1. Conexão
+        db_url = str(engine.url)
+        host_info = db_url.split("@")[-1]
+        
+        # 2. Busca Usuários
+        users = db.query(User).all()
+        
+        lista_users = []
+        for u in users:
+            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
+            # Isso pega apenas as colunas que REALMENTE existem no banco
+            dados_usuario = {}
+            for key, value in u.__dict__.items():
+                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
+                    dados_usuario[key] = value
+            
+            lista_users.append(dados_usuario)
+            
+        return {
+            "CONEXAO": host_info,
+            "TOTAL": len(users),
+            "DADOS_REAIS": lista_users
+        }
+    except Exception as e:
+        return {"erro_fatal": str(e)}
 
 # =========================================================
 # 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
