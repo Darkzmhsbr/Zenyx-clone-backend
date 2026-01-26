@@ -1,7 +1,8 @@
 import os
 import logging
 import telebot
-import requests  # <--- ESSA É A BIBLIOTECA QUE CAUSA O ERRO SE NÃO ESTIVER NO REQUIREMENTS.TXT
+import httpx
+# import requests  # <--- ESSA É A BIBLIOTECA QUE CAUSA O ERRO SE NÃO ESTIVER NO REQUIREMENTS.TXT
 import time
 import urllib.parse
 import threading
@@ -34,6 +35,25 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine
 import update_db 
+
+# =========================================================
+# 🚀 FUNÇÃO AUXILIAR ASSÍNCRONA (Substitui requests)
+# =========================================================
+async def enviar_requisicao_async(url: str, json: dict = None, data: dict = None, headers: dict = None, timeout: float = 15.0):
+    """
+    Realiza uma requisição POST assíncrona usando HTTPX.
+    Suporta tanto JSON quanto Form-Data (data).
+    """
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url, 
+            json=json, 
+            data=data, 
+            headers=headers, 
+            timeout=timeout
+        )
+        return response
+
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
@@ -105,9 +125,13 @@ class TokenData(BaseModel):
 # =========================================================
 # 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
 # =========================================================
+# =========================================================
+# 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
+# =========================================================
 TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Sua chave secreta
 
-def verify_turnstile(token: str) -> bool:
+# ⚠️ ATENÇÃO: Mudamos para 'async def'
+async def verify_turnstile(token: str) -> bool:
     """Verifica token com tratamento de erro para não derrubar o servidor"""
     # Se não tiver token ou for muito curto, bloqueia sem crashar
     if not token or len(str(token)) < 5:
@@ -119,15 +143,16 @@ def verify_turnstile(token: str) -> bool:
             "secret": TURNSTILE_SECRET_KEY,
             "response": token
         }
-        # TIMEOUT É OBRIGATÓRIO: Se a Cloudflare demorar mais de 5s, 
-        # soltamos o servidor para ele não ficar preso.
-        response = requests.post(url, data=payload, timeout=5) 
-        result = response.json()
         
+        # 🔄 SUBSTITUIÇÃO POR HTTPX (ASSÍNCRONO)
+        # O Turnstile usa 'data' (form-data), não json.
+        response = await enviar_requisicao_async(url, data=payload, timeout=5.0)
+        
+        result = response.json()
         return result.get("success", False)
+
     except Exception as e:
         # Se der erro de conexão, apenas loga e retorna False (bloqueia por segurança)
-        # O print(e) ajuda a ver no log sem parar o site.
         print(f"⚠️ Erro silencioso no Turnstile: {e}")
         return False
 
@@ -930,7 +955,9 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db
     # ========================================
     try:
         logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        # 🔄 SUBSTITUIÇÃO POR HTTPX (ASSÍNCRONO)
+        response = await enviar_requisicao_async(url, json=payload, headers=headers, timeout=10.0)
         
         if response.status_code in [200, 201]:
             logger.info(f"✅ PIX gerado com sucesso! ID: {response.json().get('id')}")
@@ -1503,7 +1530,9 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             "Accept": "application/json" 
         }
         
-        req = requests.post(url, json=payload, headers=headers, timeout=15)
+        # 🔄 SUBSTITUIÇÃO POR HTTPX (ASSÍNCRONO)
+        # Salvamos na variável 'req' para manter a lógica original
+        req = await enviar_requisicao_async(url, json=payload, headers=headers, timeout=15.0)
         
         if req.status_code in [200, 201]:
             resp = req.json()
@@ -1511,6 +1540,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             copia_cola = resp.get('qr_code_text') or resp.get('pixCopiaEcola')
             qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
 
+            # O banco de dados continua síncrono (sem await), pois estamos usando SQLAlchemy padrão
             novo_pedido = Pedido(
                 bot_id=data.bot_id, telegram_id=tid_clean, first_name=data.first_name, username=user_clean,
                 valor=data.valor, status='pending', plano_id=data.plano_id, plano_nome=data.plano_nome,
@@ -1528,7 +1558,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"❌ Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 @app.get("/api/pagamento/status/{txid}")
 def check_status(txid: str, db: Session = Depends(get_db)):
     pedido = db.query(Pedido).filter((Pedido.txid == txid) | (Pedido.transaction_id == txid)).first()
