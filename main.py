@@ -866,7 +866,7 @@ def get_plataforma_pushin_id(db: Session) -> str:
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (COM SPLIT AUTOMÁTICO)
 # =========================================================
-def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
+async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
     """
     Gera PIX com Split automático de taxa para a plataforma.
     
@@ -969,6 +969,7 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db
     except Exception as e:
         logger.error(f"❌ Exceção ao gerar PIX: {e}")
         return None
+# =========================================================
 
 # --- HELPER: Notificar Admin Principal ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
