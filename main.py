@@ -213,7 +213,7 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+def get_current_user(token: str = Depends(oauth2_scheme)):
     """Decodifica token e retorna usuário atual"""
     credentials_exception = HTTPException(
         status_code=401,
@@ -254,7 +254,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 # =========================================================
 # 👑 MIDDLEWARE: VERIFICAR SE É SUPER-ADMIN (🆕 FASE 3.4)
 # =========================================================
-async def get_current_superuser(current_user = Depends(get_current_user)):
+def get_current_superuser(current_user = Depends(get_current_user)):
     """
     Verifica se o usuário logado é um super-administrador.
     Retorna o usuário se for super-admin, caso contrário levanta HTTPException 403.
@@ -811,7 +811,7 @@ def verificar_expiracao_massa():
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
-def get_pushin_token():
+async def get_pushin_token():
     """Busca o token no banco, se não achar, tenta variável de ambiente"""
     db = SessionLocal()
     try:
@@ -1046,7 +1046,7 @@ def get_pushin_status(bot_id: int, db: Session = Depends(get_db)):
     return {"status": "conectado", "token_mask": mask}
 
 @app.post("/api/admin/integrations/pushinpay/{bot_id}")
-def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
+async def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
     # 1. Busca o Bot
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
@@ -1298,7 +1298,7 @@ class RemarketingSend(BaseModel):
     specific_user_id: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/remarketing/send")
-def send_remarketing(
+async def send_remarketing(
     bot_id: int, 
     data: RemarketingSend, 
     background_tasks: BackgroundTasks, 
@@ -1593,7 +1593,7 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
 @app.post("/api/auth/register", response_model=Token)
-def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
+async def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
     """
     Registra um novo usuário no sistema (COM PROTEÇÃO TURNSTILE)
     """
@@ -1653,17 +1653,17 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
     }
     
 @app.post("/api/auth/login", response_model=Token)
-def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
+async def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     from database import User
     
     # 1. LOG PARA DEBUG
     logger.info(f"🔑 Tentativa de login: {user_data.username}")
 
-    # 2. VERIFICAÇÃO TURNSTILE
-    if not verify_turnstile(user_data.turnstile_token):
-         log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
-                   description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
-         raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
+    # 2. VERIFICAÇÃO TURNSTILE (COM AWAIT)
+    # 2. ADICIONE AWAIT AQUI EMBAIXO 👇
+    if not await verify_turnstile(user_data.turnstile_token):
+        log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
+        raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
     # 3. Lógica de Login
     user = db.query(User).filter(User.username == user_data.username).first()
@@ -1692,7 +1692,7 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
     }
 
 @app.get("/api/auth/me")
-async def get_current_user_info(current_user = Depends(get_current_user)):
+def get_current_user_info(current_user = Depends(get_current_user)):
     """
     Retorna informações do usuário logado e status de bots para o Onboarding
     """
@@ -2317,7 +2317,7 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
 
 # 3. EDITAR PLANO (ROTA UNIFICADA)
 @app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
-async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
+def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
     try:
         data = await req.json()
         logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data}")
@@ -2611,7 +2611,7 @@ def salvar_fluxo(
 # --- 1. PASTAS (FOLDERS) ---
 
 @app.get("/api/admin/tracking/folders")
-async def list_tracking_folders(
+def list_tracking_folders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -2711,7 +2711,7 @@ async def create_tracking_folder(
         raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
 
 @app.delete("/api/admin/tracking/folders/{fid}")
-async def delete_tracking_folder(
+def delete_tracking_folder(
     fid: int, 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -2751,7 +2751,7 @@ async def delete_tracking_folder(
 # --- 2. LINKS DE RASTREAMENTO ---
 
 @app.get("/api/admin/tracking/links/{folder_id}")
-async def list_tracking_links(
+def list_tracking_links(
     folder_id: int, 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -2818,7 +2818,7 @@ async def create_tracking_link(
         raise HTTPException(status_code=500, detail="Erro interno")
 
 @app.delete("/api/admin/tracking/links/{lid}")
-async def delete_link(
+def delete_link(
     lid: int, 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -3780,7 +3780,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 # ROTA 1: LISTAR LEADS (DEDUPLICAÇÃO FORÇADA NA MEMÓRIA)
 # ============================================================
 @app.get("/api/admin/leads")
-async def listar_leads(
+def listar_leads(
     bot_id: Optional[int] = None,
     page: int = 1,
     per_page: int = 50,
@@ -3881,7 +3881,7 @@ async def listar_leads(
 # 🔥 ROTA DEFINITIVA: ESTATÍSTICAS DO FUNIL (CONTTAGEM REAL DE HUMANOS)
 # ============================================================
 @app.get("/api/admin/contacts/funnel-stats")
-async def obter_estatisticas_funil(
+def obter_estatisticas_funil(
     bot_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -3965,7 +3965,7 @@ async def obter_estatisticas_funil(
 # 🔥 ROTA DE CONTATOS (V4.0 - CORREÇÃO TOTAL DE DUPLICATAS)
 # ============================================================
 @app.get("/api/admin/contacts")
-async def get_contacts(
+def get_contacts(
     status: str = "todos",
     bot_id: Optional[int] = None,
     page: int = 1,
@@ -4138,7 +4138,7 @@ async def get_contacts(
 # ROTA 1: Atualizar Usuário (UPDATE)
 # ============================================================
 @app.put("/api/admin/users/{user_id}")
-async def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
+def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
     """
     ✏️ Atualiza informações de um usuário (status, role, custom_expiration)
     """
@@ -4202,7 +4202,7 @@ async def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
 # ROTA 2: Reenviar Acesso
 # ============================================================
 @app.post("/api/admin/users/{user_id}/resend-access")
-async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
+def resend_user_access(user_id: int, db: Session = Depends(get_db)):
     """
     🔑 Reenvia o link de acesso VIP para um usuário que já pagou
     """
@@ -6528,62 +6528,6 @@ def cron_check_expired(db: Session = Depends(get_db)):
     }
 
 # =========================================================
-# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
-# =========================================================
-@app.get("/api/admin/fix-account-emergency")
-def fix_admin_account_emergency(db: Session = Depends(get_db)):
-    try:
-        # SEU ID DA PUSHIN PAY (FIXO)
-        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
-        USERNAME_ALVO = "AdminZenyx" 
-        
-        # 1. Tenta achar o usuário
-        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
-        
-        if user:
-            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
-            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
-            
-            user.pushin_pay_id = MY_PUSHIN_ID
-            user.is_superuser = True
-            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
-            
-            db.commit()
-            return {
-                "status": "restored", 
-                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
-                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
-            }
-        
-        else:
-            # CENÁRIO B: Recria o usuário (Sem o campo role)
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            hashed_password = pwd_context.hash("123456")
-            
-            new_user = User(
-                username=USERNAME_ALVO,
-                email="admin@zenyx.com",
-                hashed_password=hashed_password,
-                is_active=True,
-                is_superuser=True,
-                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
-                pushin_pay_id=MY_PUSHIN_ID,
-                created_at=datetime.utcnow()
-            )
-            db.add(new_user)
-            db.commit()
-            return {
-                "status": "created", 
-                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
-                "info": "Senha temporária: 123456"
-            }
-
-    except Exception as e:
-        return {"status": "error", "msg": str(e)}
-
-
-# =========================================================
 # 🛠️ FERRAMENTA DE CORREÇÃO RETROATIVA (SEM GASTAR 1 CENTAVO)
 # =========================================================
 @app.get("/api/admin/sync-leads-expiration")
@@ -6620,125 +6564,6 @@ def sync_leads_expiration(db: Session = Depends(get_db)):
         }
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
-
-# =========================================================
-# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
-# =========================================================
-@app.get("/api/admin/debug-users-list")
-def debug_users_list(db: Session = Depends(get_db)):
-    try:
-        # 1. Conexão
-        db_url = str(engine.url)
-        host_info = db_url.split("@")[-1]
-        
-        # 2. Busca Usuários
-        users = db.query(User).all()
-        
-        lista_users = []
-        for u in users:
-            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
-            # Isso pega apenas as colunas que REALMENTE existem no banco
-            dados_usuario = {}
-            for key, value in u.__dict__.items():
-                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
-                    dados_usuario[key] = value
-            
-            lista_users.append(dados_usuario)
-            
-        return {
-            "CONEXAO": host_info,
-            "TOTAL": len(users),
-            "DADOS_REAIS": lista_users
-        }
-    except Exception as e:
-        return {"erro_fatal": str(e)}
-
-# =========================================================
-# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
-# =========================================================
-@app.get("/api/admin/fix-account-emergency")
-def fix_admin_account_emergency(db: Session = Depends(get_db)):
-    try:
-        # SEU ID DA PUSHIN PAY (FIXO)
-        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
-        USERNAME_ALVO = "AdminZenyx" 
-        
-        # 1. Tenta achar o usuário
-        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
-        
-        if user:
-            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
-            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
-            
-            user.pushin_pay_id = MY_PUSHIN_ID
-            user.is_superuser = True
-            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
-            
-            db.commit()
-            return {
-                "status": "restored", 
-                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
-                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
-            }
-        
-        else:
-            # CENÁRIO B: Recria o usuário (Sem o campo role)
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            hashed_password = pwd_context.hash("123456")
-            
-            new_user = User(
-                username=USERNAME_ALVO,
-                email="admin@zenyx.com",
-                hashed_password=hashed_password,
-                is_active=True,
-                is_superuser=True,
-                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
-                pushin_pay_id=MY_PUSHIN_ID,
-                created_at=datetime.utcnow()
-            )
-            db.add(new_user)
-            db.commit()
-            return {
-                "status": "created", 
-                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
-                "info": "Senha temporária: 123456"
-            }
-
-    except Exception as e:
-        return {"status": "error", "msg": str(e)}
-
-# =========================================================
-# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
-# =========================================================
-@app.get("/api/admin/debug-users-list")
-def debug_users_list(db: Session = Depends(get_db)):
-    try:
-        # 1. Conexão
-        db_url = str(engine.url)
-        host_info = db_url.split("@")[-1]
-        
-        # 2. Busca Usuários
-        users = db.query(User).all()
-        
-        lista_users = []
-        for u in users:
-            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
-            # Isso pega apenas as colunas que REALMENTE existem no banco
-            dados_usuario = {}
-            for key, value in u.__dict__.items():
-                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
-                    dados_usuario[key] = value
-            
-            lista_users.append(dados_usuario)
-            
-        return {
-            "CONEXAO": host_info,
-            "TOTAL": len(users),
-            "DADOS_REAIS": lista_users
-        }
-    except Exception as e:
-        return {"erro_fatal": str(e)}
 
 # =========================================================
 # 💀 CRON JOB: REMOVEDOR DE USUÁRIOS VENCIDOS
@@ -6811,151 +6636,4 @@ def cron_check_expired(db: Session = Depends(get_db)):
         "removidos_sucesso": removidos, 
         "erros": erros
     }
-# =========================================================
-# 🧹 FAXINA GERAL: REMOVE DUPLICATAS E CORRIGE DATAS
-# =========================================================
-@app.get("/api/admin/fix-duplicates-and-dates")
-def fix_duplicates_and_dates(db: Session = Depends(get_db)):
-    try:
-        # 1. Busca TODOS os Leads
-        leads = db.query(Lead).order_by(Lead.bot_id, Lead.user_id, desc(Lead.created_at)).all()
-        
-        unicos = {}
-        deletados = 0
-        atualizados = 0
-        
-        # 2. Lógica de Deduplicação
-        for lead in leads:
-            # Chave única: Bot + Telegram ID
-            chave = f"{lead.bot_id}_{lead.user_id}"
-            
-            if chave not in unicos:
-                # Se é a primeira vez que vemos este usuário, guardamos ele como o "OFICIAL"
-                unicos[chave] = lead
-            else:
-                # Se já vimos, este é uma DUPLICATA (e como ordenamos por desc, é o mais antigo)
-                lead_oficial = unicos[chave]
-                
-                # Se a duplicata tiver uma data melhor que o oficial, a gente rouba a data dela
-                if lead.expiration_date and (not lead_oficial.expiration_date or lead.expiration_date > lead_oficial.expiration_date):
-                    lead_oficial.expiration_date = lead.expiration_date
-                    lead_oficial.status = 'active'
-                
-                # Marca para deletar do banco
-                db.delete(lead)
-                deletados += 1
 
-        # 3. Agora varre os Pedidos para garantir que o Lead Oficial tenha a data certa
-        # (Isso resolve o problema do "Vitalício")
-        pedidos = db.query(Pedido).filter(Pedido.status == 'approved').all()
-        for p in pedidos:
-            chave_p = f"{p.bot_id}_{p.telegram_id}"
-            if chave_p in unicos:
-                lead_alvo = unicos[chave_p]
-                # Se a data do pedido for melhor/mais nova, atualiza o lead
-                if p.data_expiracao:
-                    lead_alvo.expiration_date = p.data_expiracao
-                    lead_alvo.status = 'active'
-                    atualizados += 1
-
-        db.commit()
-        
-        return {
-            "status": "sucesso",
-            "duplicatas_removidas": deletados,
-            "leads_corrigidos_pelo_pedido": atualizados,
-            "mensagem": "Sua tabela de contatos agora tem apenas 1 linha por cliente e as datas estão corretas."
-        }
-        
-    except Exception as e:
-        db.rollback()
-        return {"erro": str(e)}
-
-
-# =========================================================
-# 🛠️ FIX DATABASE: CRIAR COLUNA FALTANTE
-# =========================================================
-@app.get("/api/admin/fix-lead-column")
-def fix_lead_column_db(db: Session = Depends(get_db)):
-    try:
-        # Comando SQL direto para criar a coluna se não existir
-        db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS expiration_date TIMESTAMP"))
-        db.commit()
-        return {"status": "sucesso", "msg": "Coluna 'expiration_date' criada na tabela 'leads'!"}
-    except Exception as e:
-        return {"status": "erro", "msg": str(e)}
-
-# =========================================================
-# 🛠️ FIX FINAL: CRIAR COLUNAS QUE FALTAM (PHONE E EXPIRATION)
-# =========================================================
-@app.get("/api/admin/fix-database-structure")
-def fix_database_structure(db: Session = Depends(get_db)):
-    try:
-        # 1. Cria a coluna PHONE (que está causando o erro agora)
-        db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone VARCHAR"))
-        
-        # 2. Cria a coluna EXPIRATION_DATE (para garantir o vitalício)
-        db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS expiration_date TIMESTAMP"))
-        
-        db.commit()
-        
-        return {
-            "status": "sucesso", 
-            "msg": "✅ Colunas 'phone' e 'expiration_date' criadas com sucesso na tabela LEADS!"
-        }
-    except Exception as e:
-        db.rollback()
-        return {"status": "erro", "msg": str(e)}
-
-# =========================================================
-# 🧹 FAXINA NUCLEAR: APAGA LEADS DUPLICADOS DO BANCO
-# =========================================================
-@app.get("/api/admin/nuke-duplicate-leads")
-def nuke_duplicate_leads(db: Session = Depends(get_db)):
-    """
-    ⚠️ PERIGO: Esta rota APAGA fisicamente registros duplicados da tabela LEADS.
-    Mantém apenas o registro mais recente de cada usuário por bot.
-    """
-    try:
-        # 1. Busca TODOS os leads de TODOS os bots
-        all_leads = db.query(Lead).order_by(Lead.created_at.desc()).all()
-        
-        unicos = {}
-        ids_para_deletar = []
-        
-        # 2. Identifica quem deve morrer 💀
-        for lead in all_leads:
-            # Limpeza agressiva do ID
-            tid = str(lead.user_id).strip().replace(" ", "")
-            chave = f"{lead.bot_id}_{tid}"
-            
-            if chave not in unicos:
-                # Primeiro que aparece é o mais novo (por causa do order_by desc)
-                # Esse SOBREVIVE
-                unicos[chave] = lead.id
-            else:
-                # Se já vimos essa chave, é uma duplicata mais antiga.
-                # Esse MORRE
-                ids_para_deletar.append(lead.id)
-        
-        # 3. Execução em massa
-        if ids_para_deletar:
-            # Deleta em lotes para não travar o banco
-            chunk_size = 100
-            for i in range(0, len(ids_para_deletar), chunk_size):
-                chunk = ids_para_deletar[i:i + chunk_size]
-                db.query(Lead).filter(Lead.id.in_(chunk)).delete(synchronize_session=False)
-            
-            db.commit()
-            
-        return {
-            "status": "sucesso", 
-            "total_analisado": len(all_leads),
-            "unicos_mantidos": len(unicos),
-            "lixo_deletado": len(ids_para_deletar),
-            "msg": f"✅ {len(ids_para_deletar)} Leads duplicados foram apagados do banco de dados."
-        }
-        
-    except Exception as e:
-        db.rollback()
-        return {"status": "erro", "msg": str(e)}
