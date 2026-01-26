@@ -3105,8 +3105,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.status_funil = 'fundo'
         pedido.pagou_em = now
         
-        # 🔥 FIX CRÍTICO: SINCRO COM LEAD (Corrige o bug do "Vitalício") 🔥
-        # Isso garante que a data apareça no painel de contatos
+        # 🔥 FIX CRÍTICO: SINCRO COM LEAD (Marca como convertido quando virar cliente) 🔥
         try:
             lead = db.query(Lead).filter(
                 Lead.bot_id == pedido.bot_id, 
@@ -3114,11 +3113,14 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             ).first()
             
             if lead:
-                lead.status = "active"
-                lead.expiration_date = data_validade # <--- AQUI ESTÁ A CORREÇÃO
-                logger.info(f"✅ Lead {lead.username} sincronizado. Validade: {data_validade}")
+                # ✅ NOVA LÓGICA: Marca lead como convertido
+                lead.status = "convertido"           # Marca como convertido
+                lead.funil_stage = "cliente"         # Atualiza estágio do funil
+                lead.expiration_date = data_validade # Sincroniza data de expiração
+                db.commit()  # ← Commit DENTRO do if para garantir salvamento
+                logger.info(f"✅ Lead {lead.username} convertido em cliente. Validade: {data_validade}")
         except Exception as e_lead:
-            logger.error(f"⚠️ Erro ao sync Lead: {e_lead}")
+            logger.error(f"⚠️ Erro ao converter Lead: {e_lead}")
 
         db.commit()
         
@@ -3769,9 +3771,9 @@ async def listar_leads(
         bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
 
         # 2. BUSCA TUDO (Sem paginação no SQL)
-        # Trazemos ordenado por data DESC (do mais novo para o mais velho)
         raw_leads = db.query(Lead).filter(
-            Lead.bot_id.in_(bots_alvo)
+            Lead.bot_id.in_(bots_alvo),
+            Lead.status != "convertido"  # Exclui convertidos
         ).order_by(Lead.created_at.desc()).all()
         
         # 3. O FILTRO "PENTE FINO" 🧹
@@ -4054,15 +4056,9 @@ async def get_contacts(
                     "custom_expiration": data_exp
                 }
 
-                # Lógica de Merge: Só atualiza se o pedido for 'melhor' que o lead existente
-                if key in contatos_unicos:
-                    current = contatos_unicos[key]
-                    if data_exp or p.status in ["paid", "approved", "active"]:
-                        contatos_unicos[key] = obj_pedido
-                    elif p.created_at and current["created_at"] and p.created_at > current["created_at"]:
-                        contatos_unicos[key] = obj_pedido
-                else:
-                    contatos_unicos[key] = obj_pedido
+                # ✅ LÓGICA DE MERGE CORRIGIDA: Pedido SEMPRE sobrepõe Lead
+                # Se o usuário tem QUALQUER pedido, ele prevalece sobre o lead antigo
+                contatos_unicos[key] = obj_pedido
 
         # ============================================================
         # CENÁRIO 2: FILTROS ESPECÍFICOS (PAGANTES, PENDENTES...)
