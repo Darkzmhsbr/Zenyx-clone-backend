@@ -1757,7 +1757,7 @@ def configurar_menu_bot(token):
 # =========================================================
 
 @app.post("/api/admin/bots")
-def criar_bot(
+async def criar_bot(
     bot_data: BotCreate,
     request: Request,
     db: Session = Depends(get_db),
@@ -2049,7 +2049,7 @@ def deletar_bot(
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
-def toggle_bot(
+async def toggle_bot(
     bot_id: int, 
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
@@ -2108,7 +2108,7 @@ def listar_admins(
     return admins
 
 @app.post("/api/admin/bots/{bot_id}/admins")
-def adicionar_admin(
+async def adicionar_admin(
     bot_id: int, 
     dados: BotAdminCreate, 
     db: Session = Depends(get_db),
@@ -2390,7 +2390,7 @@ def get_order_bump(
     return bump
 
 @app.post("/api/admin/bots/{bot_id}/order-bump")
-def save_order_bump(
+async def save_order_bump(
     bot_id: int, 
     dados: OrderBumpCreate, 
     db: Session = Depends(get_db),
@@ -2530,7 +2530,7 @@ class FlowUpdate(BaseModel):
     miniapp_btn_text: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/flow")
-def salvar_fluxo(
+async def salvar_fluxo(
     bot_id: int, 
     flow: FlowUpdate, 
     db: Session = Depends(get_db),
@@ -2846,7 +2846,7 @@ def listar_passos_flow(bot_id: int, db: Session = Depends(get_db)):
     return db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
 
 @app.post("/api/admin/bots/{bot_id}/flow/steps")
-def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
+async def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot: raise HTTPException(404, "Bot não encontrado")
     
@@ -2907,7 +2907,7 @@ class BotModeUpdate(BaseModel):
     modo: str # 'tradicional' ou 'miniapp'
 
 @app.post("/api/admin/bots/{bot_id}/mode")
-def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get_db)):
+async def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get_db)):
     """Alterna entre Bot de Conversa (Tradicional) e Loja Web (Mini App)"""
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
@@ -2930,7 +2930,7 @@ def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get
 
 # 2. Salvar Configuração Global
 @app.post("/api/admin/bots/{bot_id}/miniapp/config")
-def save_miniapp_config(
+async def save_miniapp_config(
     bot_id: int, 
     dados: MiniAppConfigUpdate, 
     db: Session = Depends(get_db),
@@ -2966,7 +2966,7 @@ def save_miniapp_config(
 
 # 3. Criar Categoria
 @app.post("/api/admin/miniapp/categories")
-def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db)):
+async def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db)):
     try:
         # Se não vier slug, cria um baseado no título
         final_slug = data.slug
@@ -4202,7 +4202,7 @@ def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
 # ROTA 2: Reenviar Acesso
 # ============================================================
 @app.post("/api/admin/users/{user_id}/resend-access")
-def resend_user_access(user_id: int, db: Session = Depends(get_db)):
+async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
     """
     🔑 Reenvia o link de acesso VIP para um usuário que já pagou
     """
@@ -4304,7 +4304,7 @@ def get_flow(bot_id: int, db: Session = Depends(get_db)):
     return f
 
 @app.post("/api/admin/bots/{bot_id}/flow")
-def save_flow(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
+async def save_flow(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     f = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     if not f: f = BotFlow(bot_id=bot_id)
     db.add(f)
@@ -4323,7 +4323,7 @@ def list_steps(bot_id: int, db: Session = Depends(get_db)):
     return db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
 
 @app.post("/api/admin/bots/{bot_id}/flow/steps")
-def add_step(bot_id: int, p: FlowStepCreate, db: Session = Depends(get_db)):
+async def add_step(bot_id: int, p: FlowStepCreate, db: Session = Depends(get_db)):
     ns = BotFlowStep(bot_id=bot_id, step_order=p.step_order, msg_texto=p.msg_texto, msg_media=p.msg_media, btn_texto=p.btn_texto)
     db.add(ns)
     db.commit()
@@ -4501,7 +4501,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         db.close() # Fecha a conexão dedicada
 
 @app.post("/api/admin/remarketing/send")
-def enviar_remarketing(payload: RemarketingRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def enviar_remarketing(payload: RemarketingRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     # 1. Validação de Teste
     if payload.is_test and not payload.specific_user_id:
         ultimo = db.query(Pedido).filter(Pedido.bot_id == payload.bot_id).order_by(Pedido.id.desc()).first()
@@ -4543,7 +4543,7 @@ def enviar_remarketing(payload: RemarketingRequest, background_tasks: Background
 
 # --- ROTA DE REENVIO INDIVIDUAL (CORRIGIDA PARA HTML) ---
 @app.post("/api/admin/remarketing/send-individual")
-def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
+async def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
     # 1. Busca Campanha
     campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == payload.campaign_history_id).first()
     if not campanha: raise HTTPException(404, "Campanha não encontrada")
@@ -5369,7 +5369,7 @@ def get_user_profile(
         raise HTTPException(status_code=500, detail="Erro interno ao carregar perfil")
 
 @app.post("/api/admin/profile")
-def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
+async def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
     """
     Atualiza Nome e Foto do Administrador
     """
