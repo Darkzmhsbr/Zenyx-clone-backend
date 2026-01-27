@@ -50,22 +50,108 @@ app = FastAPI(title="Zenyx Gbot SaaS")
 # NOVA SEÇÃO COMPLETA
 http_client = None
 
+# =========================================================
+# 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR
+# =========================================================
 @app.on_event("startup")
 async def startup_event():
+    """
+    Executado quando o servidor FastAPI inicia.
+    Inicializa componentes críticos do sistema.
+    """
     global http_client
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0, connect=10.0),  # 30s geral, 10s para conexão
-        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-        follow_redirects=True
-    )
-    print("✅ HTTP Client inicializado")
+    
+    # 1. INICIALIZAR HTTP CLIENT (httpx)
+    try:
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            follow_redirects=True
+        )
+        logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
+    except Exception as e:
+        logger.error(f"❌ [STARTUP] Erro ao inicializar HTTP Client: {e}")
+    
+    # 2. VERIFICAR BANCO DE DADOS
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        logger.info("✅ [STARTUP] Conexão com banco de dados validada")
+    except Exception as e:
+        logger.error(f"❌ [STARTUP] Erro na conexão com banco: {e}")
+    
+    # 3. INICIALIZAR SCHEDULER (Background Jobs)
+    try:
+        # Job de verificação de vencimentos (a cada 12 horas)
+        scheduler.add_job(
+            verificar_vencimentos,
+            'interval',
+            hours=12,
+            id='verificar_vencimentos',
+            replace_existing=True
+        )
+        logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
+        
+        # Job de remarketing recorrente (a cada 30 minutos) - SE VOCÊ USA
+        # Descomente se tiver a função executar_remarketing
+        # scheduler.add_job(
+        #     executar_remarketing,
+        #     'interval',
+        #     minutes=30,
+        #     id='remarketing_recorrente',
+        #     replace_existing=True
+        # )
+        
+        # 🆕 Job de retry de webhooks (a cada 1 minuto)
+        scheduler.add_job(
+            processar_webhooks_pendentes,
+            'interval',
+            minutes=1,
+            id='webhook_retry_processor',
+            replace_existing=True
+        )
+        logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
+        
+        # Iniciar o scheduler
+        if not scheduler.running:
+            scheduler.start()
+            logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
+        
+    except Exception as e:
+        logger.error(f"❌ [STARTUP] Erro ao inicializar Scheduler: {e}")
+    
+    # 4. LOG DE INICIALIZAÇÃO COMPLETA
+    logger.info("=" * 60)
+    logger.info("🚀 ZENYX GBOT v5.0 - Sistema iniciado com sucesso!")
+    logger.info("=" * 60)
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """
+    Executado quando o servidor FastAPI é desligado.
+    Fecha conexões e libera recursos.
+    """
     global http_client
+    
+    # 1. Fechar HTTP Client
     if http_client:
-        await http_client.aclose()
-        print("✅ HTTP Client fechado")
+        try:
+            await http_client.aclose()
+            logger.info("✅ [SHUTDOWN] HTTP Client fechado")
+        except Exception as e:
+            logger.error(f"❌ [SHUTDOWN] Erro ao fechar HTTP Client: {e}")
+    
+    # 2. Parar Scheduler
+    try:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+            logger.info("✅ [SHUTDOWN] Scheduler encerrado")
+    except Exception as e:
+        logger.error(f"❌ [SHUTDOWN] Erro ao encerrar Scheduler: {e}")
+    
+    logger.info("👋 [SHUTDOWN] Sistema encerrado")
 
 # 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
 try:
@@ -814,6 +900,180 @@ def verificar_expiracao_massa():
                 logger.error(f"Erro ao processar bot {bot_data.id}: {e_bot}")
                 
     finally: 
+        db.close()
+
+# =========================================================
+# 🔄 SISTEMA DE RETRY DE WEBHOOKS
+# =========================================================
+
+async def processar_webhooks_pendentes():
+    """
+    Job que roda a cada 1 minuto para reprocessar webhooks que falharam.
+    Implementa exponential backoff: 1min, 2min, 4min, 8min, 16min
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        
+        # Buscar webhooks pendentes que estão prontos para retry
+        pendentes = db.query(WebhookRetry).filter(
+            WebhookRetry.status == 'pending',
+            WebhookRetry.next_retry <= now,
+            WebhookRetry.attempts < WebhookRetry.max_attempts
+        ).all()
+        
+        if not pendentes:
+            logger.debug("🔄 Nenhum webhook pendente para retry")
+            return
+        
+        logger.info(f"🔄 Processando {len(pendentes)} webhooks pendentes")
+        
+        for retry_item in pendentes:
+            try:
+                logger.info(f"🔄 Tentativa {retry_item.attempts + 1}/{retry_item.max_attempts} para webhook {retry_item.id}")
+                
+                # Deserializar payload
+                payload = json.loads(retry_item.payload)
+                
+                # Reprocessar baseado no tipo
+                if retry_item.webhook_type == 'pushinpay':
+                    # Criar request fake para passar para a função
+                    class FakeRequest:
+                        async def body(self):
+                            return retry_item.payload.encode('utf-8')
+                        
+                        async def json(self):
+                            return payload
+                    
+                    fake_req = FakeRequest()
+                    
+                    # Chamar função de webhook
+                    await webhook_pix(fake_req, db)
+                    
+                    # Se chegou aqui, sucesso!
+                    retry_item.status = 'success'
+                    retry_item.updated_at = datetime.utcnow()
+                    db.commit()
+                    
+                    logger.info(f"✅ Webhook {retry_item.id} reprocessado com sucesso")
+                    
+                else:
+                    logger.warning(f"⚠️ Tipo de webhook desconhecido: {retry_item.webhook_type}")
+                    retry_item.status = 'failed'
+                    retry_item.last_error = "Tipo de webhook não suportado"
+                    db.commit()
+                
+            except Exception as e:
+                # Incrementar tentativas
+                retry_item.attempts += 1
+                retry_item.last_error = str(e)
+                retry_item.updated_at = datetime.utcnow()
+                
+                if retry_item.attempts >= retry_item.max_attempts:
+                    # Esgotou tentativas
+                    retry_item.status = 'failed'
+                    logger.error(f"❌ Webhook {retry_item.id} falhou após {retry_item.attempts} tentativas: {e}")
+                    
+                    # CRÍTICO: Alertar equipe sobre falha definitiva
+                    await alertar_falha_webhook_critica(retry_item, db)
+                else:
+                    # Agendar próximo retry com backoff exponencial
+                    backoff_minutes = 2 ** retry_item.attempts  # 1, 2, 4, 8, 16 minutos
+                    retry_item.next_retry = now + timedelta(minutes=backoff_minutes)
+                    logger.warning(f"⚠️ Webhook {retry_item.id} falhou (tentativa {retry_item.attempts}). Próximo retry em {backoff_minutes}min")
+                
+                db.commit()
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no processador de webhooks pendentes: {e}")
+    finally:
+        db.close()
+
+
+async def alertar_falha_webhook_critica(retry_item: WebhookRetry, db: Session):
+    """
+    Alerta sobre webhooks que falharam definitivamente.
+    Envia notificação para admin via Telegram e registra no banco.
+    """
+    try:
+        # Extrair informações do payload
+        payload = json.loads(retry_item.payload)
+        
+        # Buscar pedido relacionado (se houver)
+        pedido_id = retry_item.reference_id
+        pedido_info = "Desconhecido"
+        
+        if pedido_id:
+            pedido = db.query(Pedido).filter(Pedido.transaction_id == pedido_id).first()
+            if pedido:
+                pedido_info = f"{pedido.first_name} - R$ {pedido.valor:.2f}"
+        
+        # Mensagem de alerta
+        alerta = (
+            f"🚨 <b>WEBHOOK FALHOU DEFINITIVAMENTE</b>\n\n"
+            f"📋 ID: {retry_item.id}\n"
+            f"🔄 Tentativas: {retry_item.attempts}\n"
+            f"📦 Pedido: {pedido_info}\n"
+            f"❌ Último erro: {retry_item.last_error[:200]}\n\n"
+            f"⚠️ <b>AÇÃO NECESSÁRIA:</b> Processar manualmente"
+        )
+        
+        # Enviar para todos os Super Admins
+        super_admins = db.query(User).filter(User.is_superuser == True).all()
+        
+        for admin in super_admins:
+            if admin.telegram_id:
+                try:
+                    # Buscar bot principal (primeiro ativo)
+                    bot = db.query(Bot).filter(Bot.status == 'ativo').first()
+                    if bot:
+                        tb = telebot.TeleBot(bot.token)
+                        tb.send_message(int(admin.telegram_id), alerta, parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"Erro ao enviar alerta para admin {admin.id}: {e}")
+        
+        logger.info(f"📢 Alerta de webhook crítico enviado para {len(super_admins)} admins")
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao alertar sobre falha de webhook: {e}")
+
+
+def registrar_webhook_para_retry(
+    webhook_type: str, 
+    payload: dict, 
+    reference_id: str = None
+):
+    """
+    Registra um webhook para retry futuro.
+    Chamado quando o processamento inicial falha.
+    """
+    db = SessionLocal()
+    try:
+        # Calcular primeiro retry (1 minuto no futuro)
+        first_retry = datetime.utcnow() + timedelta(minutes=1)
+        
+        # Criar registro de retry
+        retry_item = WebhookRetry(
+            webhook_type=webhook_type,
+            payload=json.dumps(payload),
+            attempts=0,
+            max_attempts=5,
+            next_retry=first_retry,
+            status='pending',
+            reference_id=reference_id
+        )
+        
+        db.add(retry_item)
+        db.commit()
+        db.refresh(retry_item)
+        
+        logger.info(f"📝 Webhook registrado para retry: ID {retry_item.id}, tipo {webhook_type}")
+        return retry_item.id
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao registrar webhook para retry: {e}")
+        return None
+    finally:
         db.close()
 
 # =========================================================
@@ -1852,6 +2112,149 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
         "username": user.username,
         "has_bots": has_bots
     }
+
+# =========================================================
+# 💓 HEALTH CHECK PARA MONITORAMENTO
+# =========================================================
+@app.get("/api/health")
+async def health_check(db: Session = Depends(get_db)):
+    """
+    Endpoint de saúde para monitoramento externo (UptimeRobot, BetterStack).
+    Retorna 200 se tudo OK, 503 se algo crítico falhar.
+    """
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "5.0.0",
+        "checks": {},
+        "warnings": []
+    }
+    
+    # 1. VERIFICAR BANCO DE DADOS
+    try:
+        db.execute(text("SELECT 1"))
+        health_status["checks"]["database"] = {
+            "status": "ok",
+            "latency_ms": None  # Poderia medir com time.time()
+        }
+    except Exception as e:
+        health_status["checks"]["database"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        health_status["status"] = "unhealthy"
+    
+    # 2. VERIFICAR HTTPX CLIENT
+    try:
+        if http_client and not http_client.is_closed:
+            health_status["checks"]["http_client"] = "ok"
+        else:
+            health_status["checks"]["http_client"] = "not_initialized"
+            health_status["warnings"].append("HTTP client não inicializado")
+    except Exception as e:
+        health_status["checks"]["http_client"] = f"error: {str(e)}"
+        health_status["warnings"].append("Problema com HTTP client")
+    
+    # 3. VERIFICAR BOTS
+    try:
+        total_bots = db.query(Bot).count()
+        bots_ativos = db.query(Bot).filter(Bot.status == 'ativo').count()
+        
+        health_status["checks"]["bots"] = {
+            "total": total_bots,
+            "active": bots_ativos,
+            "inactive": total_bots - bots_ativos
+        }
+        
+        if total_bots == 0:
+            health_status["warnings"].append("Nenhum bot cadastrado")
+        elif bots_ativos == 0:
+            health_status["warnings"].append("Nenhum bot ativo")
+            
+    except Exception as e:
+        health_status["checks"]["bots"] = f"error: {str(e)}"
+    
+    # 4. VERIFICAR CAMPANHAS DE REMARKETING
+    try:
+        enviando = db.query(RemarketingCampaign).filter(
+            RemarketingCampaign.status == 'enviando'
+        ).count()
+        
+        health_status["checks"]["remarketing_queue"] = {
+            "pending": enviando
+        }
+        
+        if enviando > 10:
+            health_status["warnings"].append(f"{enviando} campanhas pendentes (possível bottleneck)")
+    except:
+        pass
+    
+    # 5. VERIFICAR WEBHOOKS PENDENTES
+    try:
+        pendentes = db.query(WebhookRetry).filter(
+            WebhookRetry.status == 'pending'
+        ).count()
+        
+        falhados = db.query(WebhookRetry).filter(
+            WebhookRetry.status == 'failed'
+        ).count()
+        
+        health_status["checks"]["webhook_retry"] = {
+            "pending": pendentes,
+            "failed": falhados
+        }
+        
+        if falhados > 5:
+            health_status["warnings"].append(f"{falhados} webhooks falharam definitivamente")
+            health_status["status"] = "degraded"
+    except:
+        pass
+    
+    # 6. VERIFICAR SCHEDULER
+    try:
+        running_jobs = len(scheduler.get_jobs())
+        health_status["checks"]["scheduler"] = {
+            "running": scheduler.running,
+            "jobs_count": running_jobs
+        }
+        
+        if not scheduler.running:
+            health_status["warnings"].append("Scheduler não está rodando")
+            health_status["status"] = "degraded"
+    except:
+        health_status["checks"]["scheduler"] = "error"
+    
+    # 7. MÉTRICAS DE VENDAS (24H)
+    try:
+        vendas_24h = db.query(Pedido).filter(
+            Pedido.data_aprovacao >= datetime.utcnow() - timedelta(hours=24),
+            Pedido.status.in_(['paid', 'approved'])
+        ).count()
+        
+        health_status["metrics"] = {
+            "sales_24h": vendas_24h
+        }
+    except:
+        pass
+    
+    # DETERMINAR STATUS CODE HTTP
+    if health_status["status"] == "healthy":
+        status_code = 200
+    elif health_status["status"] == "degraded":
+        status_code = 200  # Ainda funcional, mas com avisos
+    else:
+        status_code = 503  # Serviço indisponível
+    
+    return JSONResponse(content=health_status, status_code=status_code)
+
+
+@app.get("/api/health/simple")
+async def health_check_simple():
+    """
+    Versão simplificada do health check (mais rápida).
+    Apenas retorna 200 se o servidor está vivo.
+    """
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
@@ -3246,189 +3649,231 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - V4.0 (CORREÇÃO VITALÍCIO + NOTIFICAÇÃO)
 # =========================================================
-@app.post("/api/webhooks/pushinpay") # Rota Nova
-@app.post("/webhook/pix")             # Rota Antiga
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - V5.0 COM RETRY
+# =========================================================
+@app.post("/api/webhooks/pushinpay")
+@app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
-    print("🔔 WEBHOOK PIX CHEGOU!") 
+    """
+    Webhook de pagamento com sistema de retry automático.
+    Se falhar, agenda reprocessamento com exponential backoff.
+    """
+    print("🔔 WEBHOOK PIX CHEGOU!")
+    
     try:
-        # 1. PEGA O CORPO BRUTO
+        # 1. EXTRAIR PAYLOAD
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
         
         try:
             data = json.loads(body_str)
-            if isinstance(data, list): data = data[0]
+            if isinstance(data, list): 
+                data = data[0]
         except:
             try:
                 parsed = urllib.parse.parse_qs(body_str)
                 data = {k: v[0] for k, v in parsed.items()}
             except:
-                logger.error(f"❌ Não foi possível ler o corpo do webhook: {body_str}")
+                logger.error(f"❌ Payload inválido: {body_str[:200]}")
                 return {"status": "ignored"}
-
-        # 2. EXTRAÇÃO E NORMALIZAÇÃO
+        
+        # 2. VALIDAR STATUS
         raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
         status_pix = str(data.get("status", "")).lower()
         
-        # Filtro de Status
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
-
-        # 3. BUSCA O PEDIDO
-        pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
-
+        
+        # 3. BUSCAR PEDIDO
+        pedido = db.query(Pedido).filter(
+            (Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)
+        ).first()
+        
         if not pedido:
-            print(f"❌ Pedido {tx_id} não encontrado.")
+            logger.warning(f"⚠️ Pedido {tx_id} não encontrado")
             return {"status": "ok", "msg": "Order not found"}
-
+        
         if pedido.status in ["approved", "paid", "active"]:
             return {"status": "ok", "msg": "Already paid"}
-
-        # 4. CÁLCULO DA DATA DE EXPIRAÇÃO (LÓGICA REFATORADA COM is_lifetime)
-        now = datetime.utcnow()
-        data_validade = None
-
-        # Buscar plano do banco (fonte única da verdade)
-        plano = None
-        if pedido.plano_id:
-            try:
-                plano_id_int = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
-                if plano_id_int:
-                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id_int).first()
-            except (ValueError, TypeError):
-                logger.warning(f"⚠️ plano_id inválido: {pedido.plano_id}")
-
-        if plano:
-            # Decisão baseada em flag explícita is_lifetime
-            if plano.is_lifetime:
-                data_validade = None  # Acesso vitalício
-                logger.info(f"♾️ Plano '{plano.nome_exibicao}' é VITALÍCIO")
-            else:
-                # Acesso temporário baseado em dias_duracao
-                dias = plano.dias_duracao if plano.dias_duracao else 30
-                data_validade = now + timedelta(days=dias)
-                logger.info(f"📅 Plano '{plano.nome_exibicao}' válido por {dias} dias até {data_validade.strftime('%d/%m/%Y')}")
-        else:
-            # Fallback: Se não encontrar plano no banco, usa padrão de 30 dias
-            logger.warning(f"⚠️ Plano ID {pedido.plano_id} não encontrado no banco. Usando 30 dias padrão.")
-            data_validade = now + timedelta(days=30)
-
-        # 5. ATUALIZA O PEDIDO
-        pedido.status = "approved" 
-        pedido.data_aprovacao = now
-        pedido.data_expiracao = data_validade     
-        pedido.custom_expiration = data_validade
-        pedido.mensagem_enviada = False
-        pedido.status_funil = 'fundo'
-        pedido.pagou_em = now
         
-        # 🔥 FIX CRÍTICO: SINCRO COM LEAD (Marca como convertido quando virar cliente) 🔥
+        # 4. PROCESSAR PAGAMENTO (LÓGICA CRÍTICA)
         try:
-            lead = db.query(Lead).filter(
-                Lead.bot_id == pedido.bot_id, 
-                Lead.user_id == pedido.telegram_id
-            ).first()
+            # Calcular data de expiração (lógica refatorada com is_lifetime)
+            now = datetime.utcnow()
+            data_validade = None
             
-            if lead:
-                # ✅ NOVA LÓGICA: Marca lead como convertido
-                lead.status = "convertido"           # Marca como convertido
-                lead.funil_stage = "cliente"         # Atualiza estágio do funil
-                lead.expiration_date = data_validade # Sincroniza data de expiração
-                db.commit()  # ← Commit DENTRO do if para garantir salvamento
-                logger.info(f"✅ Lead {lead.username} convertido em cliente. Validade: {data_validade}")
-        except Exception as e_lead:
-            logger.error(f"⚠️ Erro ao converter Lead: {e_lead}")
-
-        db.commit()
-        
-        # Atualiza Tracking
-        if pedido.tracking_id:
+            plano = None
+            if pedido.plano_id:
+                try:
+                    plano_id_int = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
+                    if plano_id_int:
+                        plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id_int).first()
+                except (ValueError, TypeError):
+                    logger.warning(f"⚠️ plano_id inválido: {pedido.plano_id}")
+            
+            if plano:
+                if plano.is_lifetime:
+                    data_validade = None
+                    logger.info(f"♾️ Plano '{plano.nome_exibicao}' é VITALÍCIO")
+                else:
+                    dias = plano.dias_duracao if plano.dias_duracao else 30
+                    data_validade = now + timedelta(days=dias)
+                    logger.info(f"📅 Plano válido por {dias} dias até {data_validade.strftime('%d/%m/%Y')}")
+            else:
+                logger.warning(f"⚠️ Plano não encontrado. Usando 30 dias padrão.")
+                data_validade = now + timedelta(days=30)
+            
+            # Atualizar pedido
+            pedido.status = "approved"
+            pedido.data_aprovacao = now
+            pedido.data_expiracao = data_validade
+            pedido.custom_expiration = data_validade
+            pedido.mensagem_enviada = False
+            pedido.status_funil = 'fundo'
+            pedido.pagou_em = now
+            
+            # Converter Lead em Cliente
             try:
-                t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
-                if t_link:
-                    t_link.vendas += 1
-                    t_link.faturamento += pedido.valor
-                    db.commit()
-            except: pass
-
-        texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
-        print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
-        
-        # ======================================================================
-        # 6. ENTREGA E NOTIFICAÇÕES (COMPLETO)
-        # ======================================================================
-        try:
-            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
-            if bot_data:
-                tb = telebot.TeleBot(bot_data.token, threaded=False)
-                target_id = str(pedido.telegram_id).strip()
-
-                # Auto-correção de ID
-                if not target_id.isdigit():
-                    clean_user = str(pedido.username).lower().replace("@", "").strip()
-                    lead = db.query(Lead).filter(
-                        Lead.bot_id == pedido.bot_id,
-                        (func.lower(Lead.username) == clean_user) | (func.lower(Lead.username) == f"@{clean_user}")
-                    ).order_by(desc(Lead.created_at)).first()
-                    if lead and lead.user_id and lead.user_id.isdigit():
-                        target_id = lead.user_id
-                        pedido.telegram_id = target_id
+                lead = db.query(Lead).filter(
+                    Lead.bot_id == pedido.bot_id,
+                    Lead.user_id == pedido.telegram_id
+                ).first()
+                
+                if lead:
+                    lead.status = "convertido"
+                    lead.funil_stage = "cliente"
+                    lead.expiration_date = data_validade
+                    logger.info(f"✅ Lead {lead.username} convertido em cliente")
+            except Exception as e_lead:
+                logger.error(f"⚠️ Erro ao converter Lead: {e_lead}")
+            
+            db.commit()
+            
+            # Atualizar Tracking
+            if pedido.tracking_id:
+                try:
+                    t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
+                    if t_link:
+                        t_link.vendas += 1
+                        t_link.faturamento += pedido.valor
                         db.commit()
-
-                if target_id.isdigit():
-                    # --- A) ENTREGA PRINCIPAL ---
-                    try: 
-                        canal_id = bot_data.id_canal_vip
-                        if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
-
-                        try: tb.unban_chat_member(canal_id, int(target_id))
-                        except: pass
-
-                        convite = tb.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Venda {pedido.first_name}")
-                        msg_cliente = (
-                            f"✅ <b>Pagamento Confirmado!</b>\n"
-                            f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                            f"Seu acesso exclusivo:\n👉 {convite.invite_link}"
-                        )
-                        tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
-                        logger.info(f"✅ Entrega principal enviada para {target_id}")
-                    except Exception as e_main:
-                        logger.error(f"Erro na entrega principal: {e_main}")
-
-                    # --- B) ENTREGA DO ORDER BUMP ---
-                    if pedido.tem_order_bump:
-                        try:
-                            bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
-                            if bump_config and bump_config.link_acesso:
-                                msg_bump = f"🎁 <b>BÔNUS LIBERADO!</b>\n\n👉 <b>{bump_config.nome_produto}</b>\n🔗 {bump_config.link_acesso}"
-                                tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
-                                logger.info("✅ Order Bump entregue!")
-                        except Exception as e_bump:
-                            logger.error(f"Erro Bump: {e_bump}")
-
-                    # --- C) NOTIFICAÇÃO ADMIN (COMPLETA) ---
-                    try: 
-                        msg_admin = (
-                            f"💰 <b>VENDA REALIZADA!</b>\n\n"
-                            f"🤖 Bot: <b>{bot_data.nome}</b>\n"
-                            f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
-                            f"📦 Plano: {pedido.plano_nome}\n"
-                            f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
-                            f"📅 Vence em: {texto_validade}"
-                        )
-                        notificar_admin_principal(bot_data, msg_admin)
-                    except Exception as e_adm:
-                        logger.error(f"Erro notificação admin: {e_adm}")
+                except:
+                    pass
+            
+            texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
+            logger.info(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
+            
+            # 5. ENTREGA DO ACESSO
+            try:
+                bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+                if bot_data:
+                    tb = telebot.TeleBot(bot_data.token, threaded=False)
+                    target_id = str(pedido.telegram_id).strip()
                     
-                    pedido.mensagem_enviada = True
-                    db.commit()
-
-        except Exception as e_tg:
-            logger.error(f"❌ Erro Telegram/Entrega: {e_tg}")
-
-        return {"status": "received"}
-
+                    # Corrigir ID se necessário
+                    if not target_id.isdigit():
+                        clean_user = str(pedido.username).lower().replace("@", "").strip()
+                        lead = db.query(Lead).filter(
+                            Lead.bot_id == pedido.bot_id,
+                            (func.lower(Lead.username) == clean_user) | 
+                            (func.lower(Lead.username) == f"@{clean_user}")
+                        ).order_by(desc(Lead.created_at)).first()
+                        
+                        if lead and lead.user_id and lead.user_id.isdigit():
+                            target_id = lead.user_id
+                            pedido.telegram_id = target_id
+                            db.commit()
+                    
+                    if target_id.isdigit():
+                        # Entrega principal
+                        try:
+                            canal_id = bot_data.id_canal_vip
+                            if str(canal_id).replace("-", "").isdigit():
+                                canal_id = int(str(canal_id).strip())
+                            
+                            try:
+                                tb.unban_chat_member(canal_id, int(target_id))
+                            except:
+                                pass
+                            
+                            convite = tb.create_chat_invite_link(
+                                chat_id=canal_id,
+                                member_limit=1,
+                                name=f"Venda {pedido.first_name}"
+                            )
+                            
+                            msg_cliente = (
+                                f"✅ <b>Pagamento Confirmado!</b>\n"
+                                f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                                f"Seu acesso exclusivo:\n👉 {convite.invite_link}"
+                            )
+                            
+                            tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
+                            logger.info(f"✅ Entrega enviada para {target_id}")
+                            
+                        except Exception as e_main:
+                            logger.error(f"❌ Erro na entrega principal: {e_main}")
+                        
+                        # Entrega Order Bump
+                        if pedido.tem_order_bump:
+                            try:
+                                bump_config = db.query(OrderBumpConfig).filter(
+                                    OrderBumpConfig.bot_id == bot_data.id
+                                ).first()
+                                
+                                if bump_config and bump_config.link_acesso:
+                                    msg_bump = (
+                                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                                        f"👉 <b>{bump_config.nome_produto}</b>\n"
+                                        f"🔗 {bump_config.link_acesso}"
+                                    )
+                                    tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                    logger.info("✅ Order Bump entregue")
+                            except Exception as e_bump:
+                                logger.error(f"❌ Erro Bump: {e_bump}")
+                        
+                        # Notificar Admin
+                        try:
+                            msg_admin = (
+                                f"💰 <b>VENDA REALIZADA!</b>\n\n"
+                                f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+                                f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
+                                f"📦 Plano: {pedido.plano_nome}\n"
+                                f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+                                f"📅 Vence em: {texto_validade}"
+                            )
+                            notificar_admin_principal(bot_data, msg_admin)
+                        except Exception as e_adm:
+                            logger.error(f"❌ Erro notificação admin: {e_adm}")
+                        
+                        pedido.mensagem_enviada = True
+                        db.commit()
+                        
+            except Exception as e_tg:
+                logger.error(f"❌ Erro Telegram/Entrega: {e_tg}")
+                # Não falhar o webhook por erro de entrega
+            
+            # Webhook processado com sucesso
+            return {"status": "received"}
+            
+        except Exception as e_process:
+            # ERRO CRÍTICO NO PROCESSAMENTO
+            logger.error(f"❌ ERRO no processamento do webhook: {e_process}")
+            
+            # Registrar para retry
+            registrar_webhook_para_retry(
+                webhook_type='pushinpay',
+                payload=data,
+                reference_id=tx_id
+            )
+            
+            # Retornar erro 500 para PushinPay tentar novamente
+            raise HTTPException(status_code=500, detail="Erro interno, será reprocessado")
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
         return {"status": "error"}
