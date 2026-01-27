@@ -2532,7 +2532,7 @@ def criar_bot(
             raise HTTPException(status_code=409, detail="Este token de bot já está sendo usado por outro usuário.")
 
     # 2. PREPARA O OBJETO BOT
-    novo_bot = Bot(
+    novo_bot = BotModel(
         nome=bot_data.nome,
         token=bot_data.token,
         id_canal_vip=bot_data.id_canal_vip,
