@@ -621,9 +621,9 @@ def verificar_bot_pertence_usuario(bot_id: int, user_id: int, db: Session):
     Verifica se o bot pertence ao usuário.
     Retorna o bot se pertencer, caso contrário levanta HTTPException 404.
     """
-    bot = db.query(Bot).filter(
-        Bot.id == bot_id,
-        Bot.owner_id == user_id
+    bot = db.query(BotModel).filter(
+        BotModel.id == bot_id,
+        BotModel.owner_id == user_id
     ).first()
     
     if not bot:
@@ -1071,7 +1071,7 @@ def verificar_expiracao_massa():
     db = SessionLocal()
     try:
         # Pega todos os bots do sistema
-        bots = db.query(Bot).all()
+        bots = db.query(BotModel).all()
         
         for bot_data in bots:
             if not bot_data.token or not bot_data.id_canal_vip: 
@@ -1276,7 +1276,7 @@ async def alertar_falha_webhook_critica(retry_item: WebhookRetry, db: Session):
             if admin.telegram_id:
                 try:
                     # Buscar bot principal (primeiro ativo)
-                    bot = db.query(Bot).filter(Bot.status == 'ativo').first()
+                    bot = db.query(BotModel).filter(BotModel.status == 'ativo').first()
                     if bot:
                         tb = telebot.TeleBot(bot.token)
                         tb.send_message(int(admin.telegram_id), alerta, parse_mode="HTML")
@@ -1353,7 +1353,7 @@ def processar_envio_massivo_background(
         logger.info(f"🚀 Iniciando envio background da campanha {campaign_id}")
         
         # 2. BUSCAR DADOS DO BOT
-        bot_data = db.query(Bot).filter(Bot.id == bot_id).first()
+        bot_data = db.query(BotModel).filter(BotModel.id == bot_id).first()
         if not bot_data:
             logger.error(f"❌ Bot {bot_id} não encontrado")
             return
@@ -1594,7 +1594,7 @@ async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: i
     # ========================================
     try:
         # 1. Busca o bot
-        bot = db.query(Bot).filter(Bot.id == bot_id).first()
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
         
         if bot and bot.owner_id:
             # 2. Busca o dono do bot (membro)
@@ -1663,7 +1663,7 @@ async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: i
 # --- HELPER: Notificar Admin Principal ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
-def notificar_admin_principal(bot_db: Bot, mensagem: str):
+def notificar_admin_principal(bot_db: BotModel, mensagem: str):
     """
     Envia notificação para o Admin Principal E para os Admins Extras configurados.
     """
@@ -1715,7 +1715,7 @@ class IntegrationUpdate(BaseModel):
 @app.get("/api/admin/integrations/pushinpay/{bot_id}")
 def get_pushin_status(bot_id: int, db: Session = Depends(get_db)):
     # Busca o BOT específico
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
     
     if not bot:
         return {"status": "erro", "msg": "Bot não encontrado"}
@@ -1737,7 +1737,7 @@ def get_pushin_status(bot_id: int, db: Session = Depends(get_db)):
 @app.post("/api/admin/integrations/pushinpay/{bot_id}")
 def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
     # 1. Busca o Bot
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail="Bot não encontrado")
     
@@ -2024,7 +2024,7 @@ def send_remarketing(
             target_id = data.specific_user_id
             if not target_id:
                 # Tenta pegar o admin do bot
-                bot = db.query(Bot).filter(Bot.id == bot_id).first()
+                bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
                 target_id = bot.admin_principal_id
             
             if target_id:
@@ -2131,7 +2131,7 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):  # �
         logger.info(f"💰 Iniciando pagamento: {data.first_name} (R$ {data.valor})")
         
         # 1. Buscar o Bot
-        bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
+        bot_atual = db.query(BotModel).filter(BotModel.id == data.bot_id).first()
         if not bot_atual:
             raise HTTPException(status_code=404, detail="Bot não encontrado")
 
@@ -2523,7 +2523,7 @@ def criar_bot(
     """
     
     # 1. VERIFICAÇÃO PREVENTIVA (Evita explosão de erro 500 no banco)
-    bot_existente = db.query(Bot).filter(Bot.token == bot_data.token).first()
+    bot_existente = db.query(BotModel).filter(BotModel.token == bot_data.token).first()
     if bot_existente:
         if bot_existente.owner_id == current_user.id:
             logger.info(f"🔄 Recuperando bot ID {bot_existente.id} para destravar fluxo.")
@@ -2607,7 +2607,7 @@ def criar_bot(
             logger.warning(f"⚠️ Token duplicado detectado: {bot_data.token}")
             
             # Tenta achar o bot que JÁ EXISTE no banco
-            bot_existente = db.query(Bot).filter(Bot.token == bot_data.token).first()
+            bot_existente = db.query(BotModel).filter(BotModel.token == bot_data.token).first()
             
             # Se o bot existe E É DO MESMO DONO (o usuário atual)
             if bot_existente and bot_existente.owner_id == current_user.id:
@@ -2945,7 +2945,7 @@ def listar_bots(
     🔒 PROTEGIDO: Apenas bots do usuário logado
     """
     # 🔒 FILTRA APENAS BOTS DO USUÁRIO
-    bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
+    bots = db.query(BotModel).filter(BotModel.owner_id == current_user.id).all()
     
     # ... RESTO DO CÓDIGO PERMANECE IGUAL (não mude nada abaixo daqui)
     result = []
@@ -3623,7 +3623,7 @@ def listar_passos_flow(bot_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/admin/bots/{bot_id}/flow/steps")
 def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
     if not bot: raise HTTPException(404, "Bot não encontrado")
     
     # Cria o novo passo
@@ -3685,13 +3685,13 @@ class BotModeUpdate(BaseModel):
 @app.post("/api/admin/bots/{bot_id}/mode")
 def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get_db)):
     """Alterna entre Bot de Conversa (Tradicional) e Loja Web (Mini App)"""
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail="Bot não encontrado")
     
     # Aqui poderíamos salvar no banco se tivéssemos a coluna 'modo', 
     # mas por enquanto vamos assumir que a existência de configuração de MiniApp
-    # ativa o modo. Se quiser formalizar, adicione 'modo' na tabela Bot.
+    # ativa o modo. Se quiser formalizar, adicione 'modo' na tabela BotModel.
     
     # Se mudar para MiniApp, cria config padrão se não existir
     if dados.modo == 'miniapp':
@@ -3955,7 +3955,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             
             # 5. ENTREGA DO ACESSO
             try:
-                bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+                bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
                 if bot_data:
                     tb = telebot.TeleBot(bot_data.token, threaded=False)
                     target_id = str(pedido.telegram_id).strip()
@@ -4168,7 +4168,7 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     if token == "pix": return {"status": "ignored"}
     
-    bot_db = db.query(Bot).filter(Bot.token == token).first()
+    bot_db = db.query(BotModel).filter(BotModel.token == token).first()
     if not bot_db or bot_db.status == "pausado": return {"status": "ignored"}
 
     try:
@@ -4801,7 +4801,7 @@ async def get_contacts(
 ):
     try:
         # 1. Busca IDs dos Bots de forma segura (SQL Direto)
-        bot_ids_query = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
+        bot_ids_query = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
         user_bot_ids = [b[0] for b in bot_ids_query]
         
         # Helper para limpar data e timezone
@@ -5049,7 +5049,7 @@ async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
             )
         
         # 3. Buscar bot
-        bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+        bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
         
         if not bot_data:
             logger.error(f"❌ Bot {pedido.bot_id} não encontrado")
@@ -5177,7 +5177,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
     try:
         # 1. Recupera a Campanha criada na rota e o Bot
         campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).first()
-        bot_db = db.query(Bot).filter(Bot.id == bot_id).first()
+        bot_db = db.query(BotModel).filter(BotModel.id == bot_id).first()
         
         if not campanha or not bot_db:
             return
@@ -5401,7 +5401,7 @@ async def enviar_remarketing(
         # =========================================================
         if payload.is_test:
             try:
-                bot_data = db.query(Bot).filter(Bot.id == payload.bot_id).first()
+                bot_data = db.query(BotModel).filter(BotModel.id == payload.bot_id).first()
                 if not bot_data:
                     raise HTTPException(404, "Bot não encontrado")
                 
@@ -5481,7 +5481,7 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
     media = config.get("media_url") or config.get("media", "")
 
     # 3. Configura Bot
-    bot_db = db.query(Bot).filter(Bot.id == payload.bot_id).first()
+    bot_db = db.query(BotModel).filter(BotModel.id == payload.bot_id).first()
     if not bot_db: raise HTTPException(404, "Bot não encontrado")
     sender = telebot.TeleBot(bot_db.token)
     
@@ -5646,10 +5646,10 @@ def dashboard_stats(
         # ============================================
         if bot_id:
             # Visão de bot único
-            bot = db.query(Bot).filter(
-                Bot.id == bot_id,
+            bot = db.query(BotModel).filter(
+                BotModel.id == bot_id,
                 # Admin vê qualquer bot, User só vê o seu
-                (Bot.owner_id == current_user.id) if not current_user.is_superuser else True
+                (BotModel.owner_id == current_user.id) if not current_user.is_superuser else True
             ).first()
             
             if not bot:
@@ -5665,7 +5665,7 @@ def dashboard_stats(
                 bots_ids = [] # Lista vazia sinaliza "todos" na lógica abaixo
             else:
                 # Usuário vê SEUS bots
-                user_bots = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
+                user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
                 bots_ids = [b.id for b in user_bots]
         
         # Se for usuário comum e não tiver bots, retorna zeros
@@ -5867,7 +5867,7 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
                 
                 # --- 🔔 NOTIFICAÇÃO AO ADMIN ---
                 try:
-                    bot_db = db.query(Bot).filter(Bot.id == p.bot_id).first()
+                    bot_db = db.query(BotModel).filter(BotModel.id == p.bot_id).first()
                     
                     if bot_db and bot_db.admin_principal_id:
                         msg_venda = (
@@ -5885,7 +5885,7 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
                 # --- ENVIO DO LINK DE ACESSO AO CLIENTE ---
                 if not p.mensagem_enviada:
                     try:
-                        bot_data = db.query(Bot).filter(Bot.id == p.bot_id).first()
+                        bot_data = db.query(BotModel).filter(BotModel.id == p.bot_id).first()
                         tb = telebot.TeleBot(bot_data.token)
                         
                         # 🔥 Tenta converter para INT. Se falhar (é username), ignora envio automático
@@ -6129,7 +6129,7 @@ def get_profile_stats(
             logger.info(f"💰 Super Admin {current_user.username}: {total_vendas_sistema} vendas × R$ {taxa_centavos/100:.2f} = R$ {total_revenue/100:.2f} (retornando {total_revenue} centavos)")
             
             # Total de bots da plataforma (Visão Macro)
-            total_bots = db.query(Bot).count()
+            total_bots = db.query(BotModel).count()
             
             # Total de membros da plataforma (AGORA VAI FUNCIONAR POIS IMPORTAMOS 'User')
             total_members = db.query(User).count()
@@ -6140,7 +6140,7 @@ def get_profile_stats(
             # ============================================
             
             # Busca todos os bots do usuário
-            user_bots = db.query(Bot.id).filter(Bot.owner_id == user_id).all()
+            user_bots = db.query(BotModel.id).filter(BotModel.owner_id == user_id).all()
             bots_ids = [bot.id for bot in user_bots]
             
             if not bots_ids:
@@ -6201,7 +6201,7 @@ def get_user_profile(
     """
     try:
         # 1. Identificar quais bots pertencem a este usuário
-        user_bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
+        user_bots = db.query(BotModel).filter(BotModel.owner_id == current_user.id).all()
         bot_ids = [b.id for b in user_bots]
         
         # Estatísticas Básicas (Filtradas pelo Dono)
@@ -6505,8 +6505,8 @@ def get_superadmin_stats(
         inactive_users = total_users - active_users
         
         # Total de bots
-        total_bots = db.query(Bot).count()
-        active_bots = db.query(Bot).filter(Bot.status == 'ativo').count()
+        total_bots = db.query(BotModel).count()
+        active_bots = db.query(BotModel).filter(BotModel.status == 'ativo').count()
         inactive_bots = total_bots - active_bots
         
         # Receita total do sistema
@@ -6537,7 +6537,7 @@ def get_superadmin_stats(
         
         recent_users_data = []
         for u in recent_users:
-            user_bots = db.query(Bot).filter(Bot.owner_id == u.id).count()
+            user_bots = db.query(BotModel).filter(BotModel.owner_id == u.id).count()
             user_sales = db.query(Pedido).filter(
                 Pedido.bot_id.in_([b.id for b in u.bots]),
                 Pedido.status.in_(['approved', 'paid'])
@@ -6651,7 +6651,7 @@ def list_all_users(
         users_data = []
         for user in users:
             # Busca bots do usuário
-            user_bots = db.query(Bot).filter(Bot.owner_id == user.id).all()
+            user_bots = db.query(BotModel).filter(BotModel.owner_id == user.id).all()
             bot_ids = [b.id for b in user_bots]
             
             # Calcula receita e vendas
@@ -6719,7 +6719,7 @@ def get_user_details(
             raise HTTPException(status_code=404, detail="Usuário não encontrado")
         
         # Busca bots do usuário
-        user_bots = db.query(Bot).filter(Bot.owner_id == user.id).all()
+        user_bots = db.query(BotModel).filter(BotModel.owner_id == user.id).all()
         bot_ids = [b.id for b in user_bots]
         
         # Calcula estatísticas
@@ -6961,7 +6961,7 @@ def delete_user(
         # Guarda informações para o log
         username = user.username
         email = user.email
-        total_bots = db.query(Bot).filter(Bot.owner_id == user.id).count()
+        total_bots = db.query(BotModel).filter(BotModel.owner_id == user.id).count()
         
         # Deleta o usuário (CASCADE vai deletar todos os relacionamentos)
         db.delete(user)
@@ -7208,7 +7208,7 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
         from database import Bot, Pedido
         
         # Conta total de bots criados (Ativos)
-        total_bots = db.query(Bot).filter(Bot.status == 'ativo').count()
+        total_bots = db.query(BotModel).filter(BotModel.status == 'ativo').count()
         
         # Conta total de pedidos aprovados
         total_sales = db.query(Pedido).filter(
@@ -7221,8 +7221,8 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
         ).scalar()
         
         # Conta usuários ativos (Donos de Bots ativos)
-        active_users = db.query(Bot.owner_id).filter(
-            Bot.status == 'ativo'
+        active_users = db.query(BotModel.owner_id).filter(
+            BotModel.status == 'ativo'
         ).distinct().count()
         
         return {
@@ -7343,7 +7343,7 @@ def limpar_leads_que_viraram_pedidos(db: Session = Depends(get_db)):
     """
     try:
         total_removidos = 0
-        bots = db.query(Bot).all()
+        bots = db.query(BotModel).all()
         
         for bot in bots:
             # Buscar todos os telegram_ids que existem em PEDIDOS
@@ -7401,7 +7401,7 @@ def cron_check_expired(db: Session = Depends(get_db)):
     
     for pedido in vencidos:
         try:
-            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+            bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
             if not bot_data: continue
             
             # Conecta no Telegram (Sem threads para evitar erro)
@@ -7686,7 +7686,7 @@ def cron_check_expired(db: Session = Depends(get_db)):
     
     for pedido in vencidos:
         try:
-            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+            bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
             if not bot_data: continue
             
             # Conecta no Telegram (Sem threads para evitar erro)
