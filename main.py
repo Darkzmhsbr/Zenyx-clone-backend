@@ -2262,6 +2262,12 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         data = await req.json()
         logger.info(f"📝 Criando plano para Bot {bot_id}: {data}")
         
+        # Extrai is_lifetime do payload (padrão False se não vier)
+        is_lifetime = data.get("is_lifetime", False)
+        
+        # Se for vitalício, dias_duracao é irrelevante (mas vamos manter no banco para histórico)
+        dias_duracao = int(data.get("dias_duracao", 30))
+        
         # Tenta pegar preco_original, se não tiver, usa 0.0
         preco_orig = float(data.get("preco_original", 0.0))
         # Se o preço original for 0, define como o dobro do atual (padrão de marketing)
@@ -2271,21 +2277,22 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         novo_plano = PlanoConfig(
             bot_id=bot_id,
             nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
-            descricao=data.get("descricao", f"Acesso de {data.get('dias_duracao')} dias"),
+            descricao=data.get("descricao", f"Acesso de {dias_duracao} dias"),
             preco_atual=float(data.get("preco_atual", 0.0)),
-            # Tenta usar 'preco_cheio' se 'preco_original' falhar (adaptação ao banco)
-            preco_cheio=preco_orig, 
-            dias_duracao=int(data.get("dias_duracao", 30)),
-            key_id=f"plan_{bot_id}_{int(time.time())}" # Garante chave única
+            preco_cheio=preco_orig,
+            dias_duracao=dias_duracao,
+            is_lifetime=is_lifetime,  # ← NOVO CAMPO
+            key_id=f"plan_{bot_id}_{int(time.time())}"
         )
         
         db.add(novo_plano)
         db.commit()
         db.refresh(novo_plano)
+        
+        logger.info(f"✅ Plano criado: {novo_plano.nome_exibicao} | Vitalício: {is_lifetime}")
         return novo_plano
 
     except TypeError as te:
-        # Se der erro de coluna inexistente, tenta criar sem o campo problemático
         logger.warning(f"⚠️ Tentando criar plano sem 'preco_cheio' devido a erro: {te}")
         db.rollback()
         try:
@@ -2295,6 +2302,7 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
                 descricao=data.get("descricao"),
                 preco_atual=float(data.get("preco_atual")),
                 dias_duracao=int(data.get("dias_duracao")),
+                is_lifetime=data.get("is_lifetime", False),  # ← NOVO CAMPO
                 key_id=f"plan_{bot_id}_{int(time.time())}"
             )
             db.add(novo_plano_fallback)
@@ -2310,34 +2318,49 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # 3. EDITAR PLANO (ROTA UNIFICADA)
-@app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
-async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
+@app.put("/api/admin/bots/{bot_id}/plans/{plan_id}")
+async def update_plan(
+    bot_id: int, 
+    plan_id: int, 
+    req: Request, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Atualiza um plano existente (incluindo is_lifetime)
+    """
     try:
         data = await req.json()
-        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data}")
         
+        # Buscar plano
         plano = db.query(PlanoConfig).filter(
-            PlanoConfig.id == plano_id, 
+            PlanoConfig.id == plan_id,
             PlanoConfig.bot_id == bot_id
         ).first()
         
         if not plano:
-            raise HTTPException(status_code=404, detail="Plano não encontrado.")
-            
-        # Atualiza campos se existirem no payload
-        if "nome_exibicao" in data: plano.nome_exibicao = data["nome_exibicao"]
-        if "descricao" in data: plano.descricao = data["descricao"]
-        if "preco_atual" in data: plano.preco_atual = float(data["preco_atual"])
-        if "preco_original" in data: plano.preco_original = float(data["preco_original"])
-        if "dias_duracao" in data: plano.dias_duracao = int(data["dias_duracao"])
+            raise HTTPException(status_code=404, detail="Plano não encontrado")
+        
+        # Atualizar campos
+        if "nome_exibicao" in data:
+            plano.nome_exibicao = data["nome_exibicao"]
+        if "descricao" in data:
+            plano.descricao = data["descricao"]
+        if "preco_atual" in data:
+            plano.preco_atual = float(data["preco_atual"])
+        if "dias_duracao" in data:
+            plano.dias_duracao = int(data["dias_duracao"])
+        if "is_lifetime" in data:  # ← NOVO CAMPO
+            plano.is_lifetime = bool(data["is_lifetime"])
         
         db.commit()
         db.refresh(plano)
+        
+        logger.info(f"✏️ Plano {plano.id} atualizado: {plano.nome_exibicao} | Vitalício: {plano.is_lifetime}")
         return plano
-    except HTTPException as he:
-        raise he
+        
     except Exception as e:
-        logger.error(f"Erro ao editar plano: {e}")
+        logger.error(f"Erro ao atualizar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 4. DELETAR PLANO (COM SEGURANÇA)
@@ -3094,26 +3117,34 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         if pedido.status in ["approved", "paid", "active"]:
             return {"status": "ok", "msg": "Already paid"}
 
-        # 4. CÁLCULO DA DATA DE EXPIRAÇÃO
+        # 4. CÁLCULO DA DATA DE EXPIRAÇÃO (LÓGICA REFATORADA COM is_lifetime)
         now = datetime.utcnow()
-        data_validade = None 
-        
-        if pedido.plano_id:
-            pid = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
-            if pid:
-                plano_db = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
-                if plano_db and plano_db.dias_duracao and plano_db.dias_duracao < 90000:
-                    data_validade = now + timedelta(days=plano_db.dias_duracao)
+        data_validade = None
 
-        if not data_validade and pedido.plano_nome:
-            nm = pedido.plano_nome.lower()
-            if "vital" not in nm and "mega" not in nm and "eterno" not in nm:
-                dias = 30
-                if "24" in nm or "diario" in nm or "1 dia" in nm: dias = 1
-                elif "semanal" in nm: dias = 7
-                elif "trimestral" in nm: dias = 90
-                elif "anual" in nm: dias = 365
+        # Buscar plano do banco (fonte única da verdade)
+        plano = None
+        if pedido.plano_id:
+            try:
+                plano_id_int = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
+                if plano_id_int:
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id_int).first()
+            except (ValueError, TypeError):
+                logger.warning(f"⚠️ plano_id inválido: {pedido.plano_id}")
+
+        if plano:
+            # Decisão baseada em flag explícita is_lifetime
+            if plano.is_lifetime:
+                data_validade = None  # Acesso vitalício
+                logger.info(f"♾️ Plano '{plano.nome_exibicao}' é VITALÍCIO")
+            else:
+                # Acesso temporário baseado em dias_duracao
+                dias = plano.dias_duracao if plano.dias_duracao else 30
                 data_validade = now + timedelta(days=dias)
+                logger.info(f"📅 Plano '{plano.nome_exibicao}' válido por {dias} dias até {data_validade.strftime('%d/%m/%Y')}")
+        else:
+            # Fallback: Se não encontrar plano no banco, usa padrão de 30 dias
+            logger.warning(f"⚠️ Plano ID {pedido.plano_id} não encontrado no banco. Usando 30 dias padrão.")
+            data_validade = now + timedelta(days=30)
 
         # 5. ATUALIZA O PEDIDO
         pedido.status = "approved" 

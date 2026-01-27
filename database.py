@@ -153,17 +153,20 @@ class OrderBumpConfig(Base):
 # 💲 PLANOS
 # =========================================================
 class PlanoConfig(Base):
-    __tablename__ = "planos_config"
+    __tablename__ = "plano_config"
+    
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"))
-    
-    key_id = Column(String, nullable=True) 
-    nome_exibicao = Column(String)
-    descricao = Column(String, nullable=True)
-    preco_cheio = Column(Float, nullable=True)
+    nome_exibicao = Column(String(100))
+    descricao = Column(Text)
     preco_atual = Column(Float)
-    dias_duracao = Column(Integer)
+    preco_cheio = Column(Float)
+    dias_duracao = Column(Integer, default=30)
+    is_lifetime = Column(Boolean, default=False)  # ← ADICIONAR ESTA LINHA
+    key_id = Column(String(100), unique=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
     
+    # Relacionamentos (manter tudo que já existe abaixo)
     bot = relationship("Bot", back_populates="planos")
 
 # =========================================================
