@@ -30,6 +30,8 @@ from jose import JWTError, jwt
 from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
+# --- Scheduler ---
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine
@@ -49,6 +51,9 @@ app = FastAPI(title="Zenyx Gbot SaaS")
 # ============ HTTPX CLIENT GLOBAL ============
 # NOVA SEÇÃO COMPLETA
 http_client = None
+
+# Inicializa o Scheduler
+scheduler = AsyncIOScheduler()
 
 # =========================================================
 # 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR
