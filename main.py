@@ -2569,6 +2569,15 @@ def criar_bot(
             bot_telegram.set_webhook(url=webhook_url)
             
             logger.info(f"🔗 Webhook definido com sucesso: {webhook_url}")
+            
+            # 3. 🆕 BUSCA O USERNAME DO BOT NA API DO TELEGRAM
+            try:
+                bot_info = bot_telegram.get_me()
+                novo_bot.username = bot_info.username  # Salva o @username no banco
+                db.commit()  # Persiste a atualização
+                logger.info(f"✅ Username capturado: @{bot_info.username}")
+            except Exception as e_username:
+                logger.warning(f"⚠️ Não foi possível capturar username: {e_username}")
 
         except Exception as e_telegram:
             # Não vamos travar a criação se der erro no Telegram, mas vamos logar FEIO
