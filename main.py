@@ -1,7 +1,7 @@
 import os
 import logging
 import telebot
-import requests  # <--- ESSA É A BIBLIOTECA QUE CAUSA O ERRO SE NÃO ESTIVER NO REQUIREMENTS.TXT
+import httpx  # <--- SUBSTITUINDO "requests"
 import time
 import urllib.parse
 import threading
@@ -45,6 +45,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
+
+# ============ HTTPX CLIENT GLOBAL ============
+# NOVA SEÇÃO COMPLETA
+http_client = None
+
+@app.on_event("startup")
+async def startup_event():
+    global http_client
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0, connect=10.0),  # 30s geral, 10s para conexão
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+        follow_redirects=True
+    )
+    print("✅ HTTP Client inicializado")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global http_client
+    if http_client:
+        await http_client.aclose()
+        print("✅ HTTP Client fechado")
 
 # 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
 try:
@@ -107,30 +128,42 @@ class TokenData(BaseModel):
 # =========================================================
 TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Sua chave secreta
 
-def verify_turnstile(token: str) -> bool:
-    """Verifica token com tratamento de erro para não derrubar o servidor"""
-    # Se não tiver token ou for muito curto, bloqueia sem crashar
-    if not token or len(str(token)) < 5:
+async def verify_turnstile(token: str) -> bool:
+    """
+    Valida token do Cloudflare Turnstile.
+    Timeout de 5 segundos para não travar o registro.
+    """
+    if not token:
         return False
-        
+    
+    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "sua-secret-key-aqui")
+    
+    payload = {
+        "secret": secret_key,
+        "response": token
+    }
+    
     try:
-        url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-        payload = {
-            "secret": TURNSTILE_SECRET_KEY,
-            "response": token
-        }
-        # TIMEOUT É OBRIGATÓRIO: Se a Cloudflare demorar mais de 5s, 
-        # soltamos o servidor para ele não ficar preso.
-        response = requests.post(url, data=payload, timeout=5) 
-        result = response.json()
+        # NOVA LINHA: httpx com timeout específico
+        response = await http_client.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data=payload,
+            timeout=5.0  # 5 segundos apenas para esta chamada
+        )
         
-        return result.get("success", False)
-    except Exception as e:
-        # Se der erro de conexão, apenas loga e retorna False (bloqueia por segurança)
-        # O print(e) ajuda a ver no log sem parar o site.
-        print(f"⚠️ Erro silencioso no Turnstile: {e}")
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False)
+        
         return False
-
+        
+    except httpx.TimeoutException:
+        print("⚠️ Timeout na validação Turnstile")
+        return False  # Permitir registro se Cloudflare estiver lento
+    except Exception as e:
+        print(f"❌ Erro Turnstile: {str(e)}")
+        return False
+        
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA SUPER ADMIN (🆕 FASE 3.4)
 # =========================================================
@@ -838,10 +871,7 @@ def get_plataforma_pushin_id(db: Session) -> str:
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
 # =========================================================
-# =========================================================
-# 🔌 INTEGRAÇÃO PUSHIN PAY (COM SPLIT AUTOMÁTICO)
-# =========================================================
-def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
+async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
     """
     Gera PIX com Split automático de taxa para a plataforma.
     
@@ -926,11 +956,13 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db
         # Continua sem split em caso de erro
     
     # ========================================
-    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY
+    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY (HTTPX ASYNC)
     # ========================================
     try:
         logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        # ✅ MIGRAÇÃO: requests → httpx
+        response = await http_client.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code in [200, 201]:
             logger.info(f"✅ PIX gerado com sucesso! ID: {response.json().get('id')}")
@@ -939,6 +971,12 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db
             logger.error(f"❌ Erro PushinPay: {response.text}")
             return None
             
+    except httpx.TimeoutException:
+        logger.error("❌ Timeout ao conectar com PushinPay (10s)")
+        return None
+    except httpx.HTTPError as e:
+        logger.error(f"❌ Erro HTTP ao chamar PushinPay: {e}")
+        return None
     except Exception as e:
         logger.error(f"❌ Exceção ao gerar PIX: {e}")
         return None
@@ -1408,11 +1446,8 @@ class PixCreateRequest(BaseModel):
 # =========================================================
 # 💰 2. GERAÇÃO DE PIX (COM SPLIT FORÇADO SEMPRE)
 # =========================================================
-# =========================================================
-# 💰 2. GERAÇÃO DE PIX (SINTAXE ANTIGA: SPLIT_RULES)
-# =========================================================
 @app.post("/api/pagamento/pix")
-def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
+async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):  # ✅ ASYNC
     try:
         logger.info(f"💰 Iniciando pagamento: {data.first_name} (R$ {data.valor})")
         
@@ -1422,7 +1457,6 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Bot não encontrado")
 
         # 2. Definir Token e ID da Plataforma
-        # 🔥 SEU ID FIXO (Como no arquivo antigo)
         PLATAFORMA_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
         
         config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
@@ -1435,7 +1469,8 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         # Tratamento de ID
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
         tid_clean = str(data.telegram_id).strip()
-        if not tid_clean.isdigit(): tid_clean = user_clean
+        if not tid_clean.isdigit(): 
+            tid_clean = user_clean
 
         # Modo Teste
         if not pushin_token:
@@ -1463,9 +1498,8 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         }
 
         # ======================================================================
-        # 💸 LÓGICA DE SPLIT (SINTAXE CORRIGIDA - IGUAL MAIN 9)
+        # 💸 LÓGICA DE SPLIT (SINTAXE CORRIGIDA)
         # ======================================================================
-        
         membro_dono = None
         if bot_atual.owner_id:
             membro_dono = db.query(User).filter(User.id == bot_atual.owner_id).first()
@@ -1477,25 +1511,19 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         # Regra: Taxa muito alta (>50%)
         if taxa_centavos >= (valor_total_centavos * 0.5):
             logger.warning(f"⚠️ Taxa muito alta. Split cancelado.")
-        
         else:
-            # 🔥 AQUI ESTÁ A CORREÇÃO CRUCIAL 🔥
-            # Usando "split_rules" e "account_id" (Sintaxe do arquivo antigo)
             payload["split_rules"] = [
                 {
-                    "value": taxa_centavos,        # Sintaxe antiga usa 'value', nova usa 'amount'
-                    "account_id": PLATAFORMA_ID,   # Sintaxe antiga usa 'account_id', nova usa 'recipient_id'
-                    "charge_processing_fee": False # Você não paga a taxa
+                    "value": taxa_centavos,
+                    "account_id": PLATAFORMA_ID,
+                    "charge_processing_fee": False
                 }
             ]
-            # Nota: Na sintaxe antiga, não precisava declarar o "remainder". 
-            # O sistema enviava o resto automaticamente para o dono do Token.
-            
             logger.info(f"✅ SPLIT (split_rules): Admin R$ {taxa_centavos/100:.2f} -> Conta {PLATAFORMA_ID}")
 
         # ======================================================================
-
-        # 4. Envia
+        # 4. ENVIA (HTTPX ASYNC)
+        # ======================================================================
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
         headers = { 
             "Authorization": f"Bearer {pushin_token}", 
@@ -1503,7 +1531,8 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             "Accept": "application/json" 
         }
         
-        req = requests.post(url, json=payload, headers=headers, timeout=15)
+        # ✅ MIGRAÇÃO: requests → httpx
+        req = await http_client.post(url, json=payload, headers=headers, timeout=15)
         
         if req.status_code in [200, 201]:
             resp = req.json()
@@ -1521,10 +1550,15 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             return {"txid": txid, "copia_cola": copia_cola, "qr_code": qr_image}
         else:
             logger.error(f"❌ Erro PushinPay: {req.text}")
-            try: detalhe = req.json().get('message', req.text)
-            except: detalhe = req.text
+            try: 
+                detalhe = req.json().get('message', req.text)
+            except: 
+                detalhe = req.text
             raise HTTPException(status_code=400, detail=f"Erro Gateway: {detalhe}")
 
+    except httpx.HTTPError as e:
+        logger.error(f"❌ Erro HTTP PushinPay: {e}")
+        raise HTTPException(status_code=503, detail="Gateway de pagamento indisponível")
     except Exception as e:
         logger.error(f"❌ Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1535,9 +1569,6 @@ def check_status(txid: str, db: Session = Depends(get_db)):
     if not pedido: return {"status": "not_found"}
     return {"status": pedido.status}
 
-# =========================================================
-# 🔐 ROTAS DE AUTENTICAÇÃO
-# =========================================================
 # =========================================================
 # 🔔 SISTEMA DE NOTIFICAÇÕES (HELPER)
 # =========================================================
@@ -1562,17 +1593,15 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
 @app.post("/api/auth/register", response_model=Token)
-def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):
+async def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):  # ✅ ASYNC
     """
     Registra um novo usuário no sistema (COM PROTEÇÃO TURNSTILE)
     """
     from database import User 
 
     # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
-    # 2. VERIFICAÇÃO TURNSTILE
-    # 2. VERIFICAÇÃO TURNSTILE (DESATIVADA PARA EVITAR ERRO NO AUTO-LOGIN)
-    # Como o token é queimado no registro, o auto-login falha se validarmos de novo.
-    # if not verify_turnstile(user_data.turnstile_token):
+    # Comentado para evitar erro no auto-login (token queimado)
+    # if not await verify_turnstile(user_data.turnstile_token):  # ✅ AWAIT
     #      log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
     #                description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
     #      raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
@@ -1612,35 +1641,31 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         expires_delta=access_token_expires
     )
     
-    # 🚀 RETORNO CORRIGIDO: Adicionado 'has_bots' para cumprir o contrato do Onboarding
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "user_id": new_user.id,
         "username": new_user.username,
-        "has_bots": False # Um novo usuário nunca tem bots ao se registrar
+        "has_bots": False
     }
     
 @app.post("/api/auth/login", response_model=Token)
-def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
+async def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):  # ✅ ASYNC
     from database import User
     
-    # 1. LOG PARA DEBUG
     logger.info(f"🔑 Tentativa de login: {user_data.username}")
 
-    # 2. VERIFICAÇÃO TURNSTILE
-    if not verify_turnstile(user_data.turnstile_token):
+    # VERIFICAÇÃO TURNSTILE
+    if not await verify_turnstile(user_data.turnstile_token):  # ✅ AWAIT
          log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
                    description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
          raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
-    # 3. Lógica de Login
     user = db.query(User).filter(User.username == user_data.username).first()
     
     if not user or not verify_password(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     
-    # Verifica se o usuário já tem ao menos um bot criado
     has_bots = len(user.bots) > 0
 
     log_action(db=db, user_id=user.id, username=user.username, action="login_success", resource_type="auth", 
@@ -3602,7 +3627,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # PIX DIRETO
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
-                    pix = gerar_pix_pushinpay(plano.preco_atual, mytx, bot_db.id, db)
+                    pix = await gerar_pix_pushinpay(plano.preco_atual, mytx, bot_db.id, db)  # ✅ COM AWAIT
 
                     
                     if pix:
@@ -3653,7 +3678,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
                 mytx = str(uuid.uuid4())
-                pix = gerar_pix_pushinpay(valor_final, mytx, bot_db.id, db)
+                pix = await gerar_pix_pushinpay(valor_final, mytx, bot_db.id, db)  # ✅ COM AWAIT
                 
                 if pix:
                     qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -3695,7 +3720,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
                         msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                         mytx = str(uuid.uuid4())
-                        pix = gerar_pix_pushinpay(preco_final, mytx, bot_db.id, db)
+                        pix = await gerar_pix_pushinpay(preco_final, mytx, bot_db.id, db)  # ✅ COM AWAIT
                         
                         if pix:
                             qr = pix.get('qr_code_text') or pix.get('qr_code')
