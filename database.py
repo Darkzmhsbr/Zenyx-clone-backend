@@ -172,9 +172,6 @@ class PlanoConfig(Base):
 # =========================================================
 # 📢 REMARKETING
 # =========================================================
-# =========================================================
-# 📢 REMARKETING
-# =========================================================
 class RemarketingCampaign(Base):
     __tablename__ = "remarketing_campaigns"
     
@@ -186,7 +183,7 @@ class RemarketingCampaign(Base):
     # Configuração
     target = Column(String, default="todos")  # 'todos', 'compradores', 'nao_compradores', 'lead'
     type = Column(String, default="massivo")  # 'teste' ou 'massivo'
-    config = Column(Text)  # JSON com mensagem, media_url, etc (mudei String para Text)
+    config = Column(Text)  # JSON com mensagem, media_url, etc
     
     # Status e Controle
     status = Column(String, default="agendado")  # 'agendado', 'enviando', 'concluido', 'erro'
@@ -201,13 +198,13 @@ class RemarketingCampaign(Base):
     promo_price = Column(Float, nullable=True)
     expiration_at = Column(DateTime, nullable=True)
     
-    # Métricas de Execução (CAMPOS CRÍTICOS PARA BACKGROUNDTASKS)
+    # Métricas de Execução
     total_leads = Column(Integer, default=0)      # Total planejado
     sent_success = Column(Integer, default=0)     # Enviados com sucesso
     blocked_count = Column(Integer, default=0)    # Bloqueados/Erro
-    data_envio = Column(DateTime, default=datetime.utcnow)  # ← ESTE ESTAVA FALTANDO
+    data_envio = Column(DateTime, default=datetime.utcnow) 
     
-    # Relacionamento
+    # Relacionamento (Aponta para o Bot e espera que ele tenha 'remarketing_campaigns')
     bot = relationship("Bot", back_populates="remarketing_campaigns")
 
 # =========================================================
