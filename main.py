@@ -262,32 +262,6 @@ async def processar_webhooks_pendentes():
 # CONFIGURAÇÃO DO SCHEDULER
 # ============================================================
 
-scheduler = AsyncIOScheduler()
-
-# Adicionar jobs
-scheduler.add_job(
-    verificar_vencimentos,
-    'interval',
-    hours=12,
-    id='verificar_vencimentos'
-)
-
-scheduler.add_job(
-    processar_webhooks_pendentes,
-    'interval',
-    minutes=1,
-    id='webhook_retry_processor'
-)
-
-scheduler.add_job(
-    cleanup_orphan_jobs,
-    'interval',
-    hours=1,
-    id='cleanup_remarketing_jobs',
-    replace_existing=True
-)
-logger.info("✅ [SCHEDULER] Job de cleanup de remarketing configurado (1h)")
-
 # ============ HTTPX CLIENT GLOBAL ============
 http_client = None
 
@@ -565,6 +539,39 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
 
         finally: db.close()
     except Exception as e: logger.error(f"❌ [SCHEDULE] Erro: {e}")
+
+# ============================================================
+# CONFIGURAÇÃO DO SCHEDULER (MOVIDO PARA CÁ)
+# ============================================================
+
+scheduler = AsyncIOScheduler()
+
+# Adicionar jobs
+scheduler.add_job(
+    verificar_vencimentos,
+    'interval',
+    hours=12,
+    id='verificar_vencimentos'
+)
+
+scheduler.add_job(
+    processar_webhooks_pendentes,
+    'interval',
+    minutes=1,
+    id='webhook_retry_processor'
+)
+
+scheduler.add_job(
+    cleanup_orphan_jobs,
+    'interval',
+    hours=1,
+    id='cleanup_remarketing_jobs',
+    replace_existing=True
+)
+
+logger.info("✅ [SCHEDULER] Job de vencimentos agendado (12h)")
+logger.info("✅ [SCHEDULER] Job de retry de webhooks agendado (1 min)")
+logger.info("✅ [SCHEDULER] Job de cleanup de remarketing agendado (1h)")
 
 
 # =========================================================
