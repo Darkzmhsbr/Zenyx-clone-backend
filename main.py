@@ -668,56 +668,95 @@ async def shutdown_event():
 async def start_alternating_messages_job(
     bot_token: str,
     chat_id: int,
-    message_id: int,
+    message_id: int,  # Este parâmetro não será usado, mas mantém compatibilidade
     messages: list,
     interval_seconds: int,
     stop_at: datetime,
     auto_destruct: bool,
     bot_id: int
 ):
+    """
+    Envia mensagens alternantes para o usuário.
+    CORRIGIDO: Agora ENVIA novas mensagens em vez de editar.
+    """
     try:
         bot = TeleBot(bot_token, threaded=False)
         index = 0
+        last_message_id = None
         
         logger.info(f"✅ [ALTERNATING] Iniciado - User: {chat_id}, Msgs: {len(messages)}")
         
         while datetime.now() < stop_at:
             try:
                 current_message = messages[index % len(messages)]
-                bot.edit_message_text(
+                
+                # ✅ CORREÇÃO: Deleta mensagem anterior
+                if last_message_id:
+                    try:
+                        bot.delete_message(chat_id=chat_id, message_id=last_message_id)
+                        logger.debug(f"🗑️ Mensagem alternante anterior deletada: {last_message_id}")
+                    except Exception as e_del:
+                        logger.debug(f"⚠️ Erro ao deletar mensagem: {e_del}")
+                
+                # ✅ CORREÇÃO: ENVIA nova mensagem (não edita)
+                msg = bot.send_message(
                     chat_id=chat_id,
-                    message_id=message_id,
                     text=current_message,
                     parse_mode='HTML'
                 )
+                last_message_id = msg.message_id
+                
+                logger.info(f"📨 [ALTERNATING] Mensagem {index + 1}/{len(messages)} enviada")
+                
                 index += 1
                 
+                # Calcula tempo restante
                 remaining = (stop_at - datetime.now()).total_seconds()
                 sleep_time = min(interval_seconds, remaining)
                 
-                if sleep_time <= 0: break
+                if sleep_time <= 0:
+                    logger.info(f"⏰ [ALTERNATING] Tempo esgotado para {chat_id}")
+                    break
                 
                 await asyncio.sleep(sleep_time)
                 
+            except ApiTelegramException as e:
+                error_msg = str(e).lower()
+                if "bot was blocked" in error_msg or "user is deactivated" in error_msg:
+                    logger.warning(f"⚠️ [ALTERNATING] Usuário {chat_id} bloqueou o bot")
+                    break
+                elif "message to edit not found" in error_msg:
+                    logger.warning(f"⚠️ [ALTERNATING] Mensagem não encontrada")
+                    break
+                else:
+                    logger.error(f"❌ [ALTERNATING] Erro API: {e}")
+                    await asyncio.sleep(interval_seconds)
+            
             except Exception as e:
-                # Ignora erros de "mensagem não encontrada" (usuário apagou)
-                if "message to edit not found" in str(e).lower(): break
+                logger.error(f"❌ [ALTERNATING] Erro geral: {e}")
                 await asyncio.sleep(interval_seconds)
         
-        if auto_destruct:
+        # Auto-destruição da última mensagem
+        if auto_destruct and last_message_id:
             try:
                 await asyncio.sleep(1)
-                bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except: pass
+                bot.delete_message(chat_id=chat_id, message_id=last_message_id)
+                logger.info(f"🗑️ [ALTERNATING] Última mensagem autodestruída")
+            except Exception as e_auto:
+                logger.error(f"⚠️ [ALTERNATING] Erro na autodestruição: {e_auto}")
+        
+        logger.info(f"✅ [ALTERNATING] Finalizado para {chat_id}")
             
     except asyncio.CancelledError:
+        logger.info(f"⏹️ [ALTERNATING] Cancelado para {chat_id}")
         pass
     except Exception as e:
-        logger.error(f"❌ [ALTERNATING] Erro: {e}")
+        logger.error(f"❌ [ALTERNATING] Erro crítico: {e}")
     finally:
         with remarketing_lock:
             if chat_id in alternating_tasks:
                 del alternating_tasks[chat_id]
+                logger.debug(f"🧹 [ALTERNATING] Task removida para {chat_id}")
 
 
 async def send_remarketing_job(
@@ -743,10 +782,10 @@ async def send_remarketing_job(
 
             # Verifica envio hoje
             hoje = datetime.now().date()
-            if db.query(RemarketingSentLog).filter(
-                RemarketingSentLog.bot_id == bot_id,
-                RemarketingSentLog.user_telegram_id == chat_id,
-                func.date(RemarketingSentLog.sent_at) == hoje
+            if db.query(RemarketingLog).filter(
+                RemarketingLog.bot_id == bot_id,
+                RemarketingLog.user_telegram_id == chat_id,
+                func.date(RemarketingLog.sent_at) == hoje
             ).first():
                 return
 
@@ -779,7 +818,7 @@ async def send_remarketing_job(
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
-                db.add(RemarketingSentLog(
+                db.add(RemarketingLog(
                     bot_id=bot_id, user_telegram_id=chat_id, 
                     message_text=msg_text, status='sent', sent_at=datetime.now()
                 ))
@@ -834,38 +873,78 @@ async def cleanup_orphan_jobs():
 
 def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_message_id: int, user_info: dict):
     try:
+        # ✅ ADICIONAR ESTES LOGS NO INÍCIO:
+        logger.info(f"🔔 [SCHEDULE] Iniciando agendamento - Bot: {bot_id}, Chat: {chat_id}")
+        
         db = SessionLocal()
         try:
-            config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id, RemarketingConfig.is_active == True).first()
-            if not config: return
+            config = db.query(RemarketingConfig).filter(
+                RemarketingConfig.bot_id == bot_id, 
+                RemarketingConfig.is_active == True
+            ).first()
+            
+            if not config:
+                logger.warning(f"⚠️ [SCHEDULE] Config não encontrada para bot {bot_id}")
+                return
+            
+            logger.info(f"✅ [SCHEDULE] Config encontrada - Delay: {config.delay_minutes} min")
 
             bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
-            if not bot or not bot.token: return
+            if not bot or not bot.token:
+                logger.error(f"❌ [SCHEDULE] Bot {bot_id} não encontrado ou sem token")
+                return
+            
+            logger.info(f"✅ [SCHEDULE] Bot validado - Token: {bot.token[:10]}...")
 
             config_dict = {
-                'message_text': config.message_text, 'media_url': config.media_url, 'media_type': config.media_type,
-                'delay_minutes': config.delay_minutes, 'auto_destruct_seconds': config.auto_destruct_seconds,
+                'message_text': config.message_text, 
+                'media_url': config.media_url, 
+                'media_type': config.media_type,
+                'delay_minutes': config.delay_minutes, 
+                'auto_destruct_seconds': config.auto_destruct_seconds,
                 'promo_values': config.promo_values or {}
             }
 
             # Agenda Alternating
-            alt_config = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id, AlternatingMessages.is_active == True).first()
+            alt_config = db.query(AlternatingMessages).filter(
+                AlternatingMessages.bot_id == bot_id, 
+                AlternatingMessages.is_active == True
+            ).first()
+            
             if alt_config and alt_config.messages:
+                logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
+                
                 stop_at = datetime.now() + timedelta(minutes=config.delay_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
+                
+                logger.info(f"⏰ [SCHEDULE] Alternating vai parar em: {stop_at.strftime('%H:%M:%S')}")
+                
                 loop = asyncio.get_event_loop()
                 task = loop.create_task(start_alternating_messages_job(
                     bot.token, chat_id, payment_message_id, alt_config.messages, 
                     alt_config.rotation_interval_seconds, stop_at, alt_config.auto_destruct_final, bot_id
                 ))
-                with remarketing_lock: alternating_tasks[chat_id] = task
+                with remarketing_lock: 
+                    alternating_tasks[chat_id] = task
+                
+                logger.info(f"✅ [SCHEDULE] Task de alternating criada para {chat_id}")
+            else:
+                logger.info(f"ℹ️ [SCHEDULE] Mensagens alternantes desativadas")
 
             # Agenda Remarketing
+            logger.info(f"⏰ [SCHEDULE] Agendando remarketing para daqui a {config.delay_minutes} minutos")
+            
             loop = asyncio.get_event_loop()
             task = loop.create_task(send_remarketing_job(bot.token, chat_id, config_dict, user_info, bot_id))
-            with remarketing_lock: remarketing_timers[chat_id] = task
+            with remarketing_lock: 
+                remarketing_timers[chat_id] = task
+            
+            logger.info(f"✅ [SCHEDULE] Task de remarketing criada para {chat_id}")
 
-        finally: db.close()
-    except Exception as e: logger.error(f"❌ [SCHEDULE] Erro: {e}")
+        finally: 
+            db.close()
+            
+    except Exception as e: 
+        logger.error(f"❌ [SCHEDULE] Erro: {e}", exc_info=True)
 
 # ============================================================
 # CONFIGURAÇÃO DO SCHEDULER (MOVIDO PARA CÁ)
@@ -1604,26 +1683,26 @@ def get_auto_remarketing_stats(
         if bot.owner_id != current_user.id and not current_user.is_superuser:
             raise HTTPException(status_code=403, detail="Acesso negado")
         
-        total_sent = db.query(RemarketingSentLog).filter(
-            RemarketingSentLog.bot_id == bot_id
+        total_sent = db.query(RemarketingLog).filter(
+            RemarketingLog.bot_id == bot_id
         ).count()
         
-        total_converted = db.query(RemarketingSentLog).filter(
-            RemarketingSentLog.bot_id == bot_id,
-            RemarketingSentLog.converted == True
+        total_converted = db.query(RemarketingLog).filter(
+            RemarketingLog.bot_id == bot_id,
+            RemarketingLog.converted == True
         ).count()
         
         conversion_rate = (total_converted / total_sent * 100) if total_sent > 0 else 0
         
         hoje = datetime.now().date()
-        today_sent = db.query(RemarketingSentLog).filter(
-            RemarketingSentLog.bot_id == bot_id,
-            func.date(RemarketingSentLog.sent_at) == hoje
+        today_sent = db.query(RemarketingLog).filter(
+            RemarketingLog.bot_id == bot_id,
+            func.date(RemarketingLog.sent_at) == hoje
         ).count()
         
-        recent_logs = db.query(RemarketingSentLog).filter(
-            RemarketingSentLog.bot_id == bot_id
-        ).order_by(RemarketingSentLog.sent_at.desc()).limit(10).all()
+        recent_logs = db.query(RemarketingLog).filter(
+            RemarketingLog.bot_id == bot_id
+        ).order_by(RemarketingLog.sent_at.desc()).limit(10).all()
         
         recent_data = [
             {
