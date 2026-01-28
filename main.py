@@ -88,6 +88,333 @@ remarketing_lock = Lock()
 remarketing_timers = {}  # {chat_id: asyncio.Task}
 alternating_tasks = {}   # {chat_id: asyncio.Task}
 
+
+
+# ============================================================
+# 🎯 SISTEMA DE REMARKETING AUTOMÁTICO
+# ============================================================
+
+# Dicionário de usuários que já receberam remarketing (para não enviar duplicado)
+usuarios_com_remarketing_enviado = set()
+
+# ============================================================
+# FUNÇÃO 1: MENSAGENS ALTERNANTES
+# ============================================================
+def alternar_mensagens_pagamento(bot_instance, chat_id, bot_id):
+    """
+    Inicia o loop de alternância de mensagens após envio do PIX.
+    As mensagens alternam até XX segundos antes do disparo automático.
+    """
+    try:
+        db = SessionLocal()
+        
+        # Busca configuração de mensagens alternantes
+        config = db.query(AlternatingMessages).filter(
+            AlternatingMessages.bot_id == bot_id,
+            AlternatingMessages.is_active == True
+        ).first()
+        
+        if not config or not config.messages or len(config.messages) < 2:
+            logger.info(f"Mensagens alternantes desativadas ou insuficientes para bot {bot_id}")
+            db.close()
+            return
+        
+        # Busca config de remarketing para saber quando parar
+        remarketing_cfg = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id
+        ).first()
+        
+        if not remarketing_cfg:
+            logger.warning(f"Config de remarketing não encontrada para bot {bot_id}")
+            db.close()
+            return
+        
+        db.close()
+        
+        # Calcula timing
+        delay_remarketing = remarketing_cfg.delay_minutes * 60
+        stop_before = config.stop_before_remarketing_seconds
+        rotation_interval = config.rotation_interval_seconds
+        
+        # Tempo total de alternância
+        tempo_total_alternacao = delay_remarketing - stop_before
+        
+        if tempo_total_alternacao <= 0:
+            logger.warning(f"Tempo de alternância inválido para bot {bot_id}")
+            return
+        
+        # Inicia thread de alternância
+        def loop_alternancia():
+            mensagens = config.messages
+            index = 0
+            ultimo_message_id = None
+            tempo_inicio = time.time()
+            
+            while True:
+                tempo_decorrido = time.time() - tempo_inicio
+                
+                # Para se atingiu o limite de tempo
+                if tempo_decorrido >= tempo_total_alternacao:
+                    logger.info(f"Alternância finalizada para {chat_id}")
+                    
+                    # Auto-destruir mensagem final se configurado
+                    if config.auto_destruct_final and ultimo_message_id:
+                        try:
+                            bot_instance.delete_message(chat_id, ultimo_message_id)
+                        except:
+                            pass
+                    break
+                
+                # Deleta mensagem anterior
+                if ultimo_message_id:
+                    try:
+                        bot_instance.delete_message(chat_id, ultimo_message_id)
+                    except:
+                        pass
+                
+                # Envia nova mensagem
+                try:
+                    mensagem_atual = mensagens[index % len(mensagens)]
+                    msg = bot_instance.send_message(chat_id, mensagem_atual)
+                    ultimo_message_id = msg.message_id
+                    index += 1
+                except ApiTelegramException as e:
+                    if "bot was blocked" in str(e):
+                        logger.warning(f"Usuário {chat_id} bloqueou o bot")
+                        break
+                except Exception as e:
+                    logger.error(f"Erro ao enviar mensagem alternante: {e}")
+                    break
+                
+                # Aguarda próximo ciclo
+                time.sleep(rotation_interval)
+        
+        # Inicia thread
+        thread = threading.Thread(target=loop_alternancia, daemon=True)
+        thread.start()
+        alternating_tasks[chat_id] = thread
+        
+        logger.info(f"✅ Mensagens alternantes iniciadas para {chat_id} (bot {bot_id})")
+        
+    except Exception as e:
+        logger.error(f"Erro ao iniciar mensagens alternantes: {e}")
+
+# ============================================================
+# FUNÇÃO 2: CANCELAR ALTERNAÇÃO
+# ============================================================
+def cancelar_alternacao_mensagens(chat_id):
+    """Cancela o loop de mensagens alternantes"""
+    if chat_id in alternating_tasks:
+        try:
+            # Thread será interrompida naturalmente
+            alternating_tasks.pop(chat_id, None)
+            logger.info(f"Alternação cancelada para {chat_id}")
+        except Exception as e:
+            logger.error(f"Erro ao cancelar alternação: {e}")
+
+# ============================================================
+# FUNÇÃO 3: DISPARO AUTOMÁTICO
+# ============================================================
+def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
+    """
+    Envia o disparo automático de remarketing após o tempo configurado.
+    Inclui mídia, texto e botões com valores promocionais.
+    """
+    try:
+        # Remove do set de timers ativos
+        if chat_id in remarketing_timers:
+            remarketing_timers.pop(chat_id, None)
+        
+        # Verifica se já enviou
+        if chat_id in usuarios_com_remarketing_enviado:
+            logger.info(f"Remarketing já enviado para {chat_id}")
+            return
+        
+        db = SessionLocal()
+        
+        # Busca config de remarketing
+        config = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id,
+            RemarketingConfig.is_active == True
+        ).first()
+        
+        if not config:
+            logger.warning(f"Config de remarketing não encontrada para bot {bot_id}")
+            db.close()
+            return
+        
+        # Busca planos para montar botões
+        planos = db.query(PlanoConfig).filter(
+            PlanoConfig.bot_id == bot_id
+        ).all()
+        
+        db.close()
+        
+        # Para mensagens alternantes
+        cancelar_alternacao_mensagens(chat_id)
+        
+        # Prepara mensagem
+        mensagem = config.message_text or "🔥 OFERTA ESPECIAL! Não perca essa chance!"
+        
+        # Envia mídia se configurado
+        message_id = None
+        try:
+            if config.media_url and config.media_type:
+                if config.media_type == 'photo':
+                    msg = bot_instance.send_photo(
+                        chat_id,
+                        config.media_url,
+                        caption=mensagem,
+                        parse_mode='HTML'
+                    )
+                elif config.media_type == 'video':
+                    msg = bot_instance.send_video(
+                        chat_id,
+                        config.media_url,
+                        caption=mensagem,
+                        parse_mode='HTML'
+                    )
+                else:
+                    msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML')
+            else:
+                msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML')
+            
+            message_id = msg.message_id
+            
+        except ApiTelegramException as e:
+            if "bot was blocked" in str(e):
+                logger.warning(f"Usuário {chat_id} bloqueou o bot")
+                return
+            logger.error(f"Erro ao enviar mídia de remarketing: {e}")
+            return
+        
+        # Monta botões com valores promocionais
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        
+        promo_values = config.promo_values or {}
+        
+        for plano in planos:
+            # Usa valor promocional se existir, senão usa valor normal
+            valor_promo = promo_values.get(str(plano.id), plano.preco_atual)
+            
+            botao_texto = f"🔥 {plano.nome_exibicao} - R$ {valor_promo:.2f}"
+            botao = types.InlineKeyboardButton(
+                botao_texto,
+                callback_data=f"remarketing_plano_{plano.id}"
+            )
+            markup.add(botao)
+        
+        # Envia botões
+        bot_instance.send_message(
+            chat_id,
+            "👇 Escolha seu plano:",
+            reply_markup=markup
+        )
+        
+        # Marca como enviado
+        usuarios_com_remarketing_enviado.add(chat_id)
+        
+        # Registra no log
+        db = SessionLocal()
+        log = RemarketingLog(
+            bot_id=bot_id,
+            user_telegram_id=chat_id,
+            sent_at=datetime.utcnow(),
+            message_text=mensagem,
+            promo_values=promo_values,
+            status='sent'
+        )
+        db.add(log)
+        db.commit()
+        db.close()
+        
+        # Auto-destruir se configurado
+        if config.auto_destruct_seconds > 0 and message_id:
+            def auto_delete():
+                time.sleep(config.auto_destruct_seconds)
+                try:
+                    bot_instance.delete_message(chat_id, message_id)
+                except:
+                    pass
+            
+            threading.Thread(target=auto_delete, daemon=True).start()
+        
+        logger.info(f"✅ Remarketing automático enviado para {chat_id} (bot {bot_id})")
+        
+    except Exception as e:
+        logger.error(f"Erro ao enviar remarketing automático: {e}")
+
+# ============================================================
+# FUNÇÃO 4: AGENDAR REMARKETING
+# ============================================================
+def agendar_remarketing_automatico(bot_instance, chat_id, bot_id):
+    """
+    Agenda o disparo automático de remarketing após o tempo configurado.
+    """
+    try:
+        # Verifica se já foi enviado
+        if chat_id in usuarios_com_remarketing_enviado:
+            logger.info(f"Remarketing já enviado anteriormente para {chat_id}")
+            return
+        
+        # Busca config
+        db = SessionLocal()
+        config = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id
+        ).first()
+        db.close()
+        
+        if not config or not config.is_active:
+            logger.info(f"Remarketing desativado para bot {bot_id}")
+            return
+        
+        delay_seconds = config.delay_minutes * 60
+        
+        # Cancela timer anterior se existir
+        if chat_id in remarketing_timers:
+            try:
+                remarketing_timers[chat_id].cancel()
+            except:
+                pass
+        
+        # Cria novo timer
+        timer = threading.Timer(
+            delay_seconds,
+            enviar_remarketing_automatico,
+            args=[bot_instance, chat_id, bot_id]
+        )
+        timer.daemon = True
+        timer.start()
+        
+        remarketing_timers[chat_id] = timer
+        
+        logger.info(f"✅ Remarketing agendado para {chat_id} em {config.delay_minutes} minutos")
+        
+    except Exception as e:
+        logger.error(f"Erro ao agendar remarketing: {e}")
+
+# ============================================================
+# FUNÇÃO 5: CANCELAR REMARKETING
+# ============================================================
+def cancelar_remarketing(chat_id):
+    """
+    Cancela o remarketing agendado (usado quando usuário paga).
+    """
+    try:
+        # Cancela timer
+        if chat_id in remarketing_timers:
+            timer = remarketing_timers.pop(chat_id, None)
+            if timer:
+                timer.cancel()
+        
+        # Cancela mensagens alternantes
+        cancelar_alternacao_mensagens(chat_id)
+        
+        logger.info(f"✅ Remarketing cancelado para {chat_id}")
+        
+    except Exception as e:
+        logger.error(f"Erro ao cancelar remarketing: {e}")
+
 # ============================================================
 # FUNÇÕES DE JOBS AGENDADOS
 # ============================================================
@@ -2318,9 +2645,6 @@ def get_plataforma_pushin_id(db: Session) -> str:
         logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
         return None
 # =========================================================
-# 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
-# =========================================================
-# =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA COM REMARKETING)
 # =========================================================
 async def gerar_pix_pushinpay(
@@ -2333,7 +2657,7 @@ async def gerar_pix_pushinpay(
     plano_nome: str = None            # ← NOVO PARÂMETRO
 ):
     """
-    Gera PIX com Split automático de taxa para a plataforma.
+    Gera PIX com Split automático de taxa para a plataforma + Remarketing integrado.
     
     Args:
         valor_float: Valor do PIX em reais (ex: 100.50)
@@ -2437,24 +2761,27 @@ async def gerar_pix_pushinpay(
             if user_telegram_id and user_first_name:
                 try:
                     # Converte telegram_id para int (necessário para remarketing)
-                    chat_id_int = int(user_telegram_id) if user_telegram_id.isdigit() else hash(user_telegram_id) % 1000000000
+                    chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
                     
-                    # Agenda remarketing + mensagens alternantes
-                    schedule_remarketing_and_alternating(
-                        bot_id=bot_id,
-                        chat_id=chat_id_int,
-                        payment_message_id=0,  # ID da mensagem PIX (0 = não disponível)
-                        user_info={
-                            'first_name': user_first_name,
-                            'plano': plano_nome or 'VIP',
-                            'valor': valor_float
-                        }
-                    )
-                    
-                    logger.info(
-                        f"📧 [REMARKETING] Agendado para {user_first_name} "
-                        f"(Bot: {bot_id}, Chat: {chat_id_int})"
-                    )
+                    if chat_id_int:
+                        # Agenda remarketing + mensagens alternantes
+                        schedule_remarketing_and_alternating(
+                            bot_id=bot_id,
+                            chat_id=chat_id_int,
+                            payment_message_id=0,  # ID da mensagem PIX (0 = não disponível aqui)
+                            user_info={
+                                'first_name': user_first_name,
+                                'plano': plano_nome or 'VIP',
+                                'valor': valor_float
+                            }
+                        )
+                        
+                        logger.info(
+                            f"📧 [REMARKETING] Agendado para {user_first_name} "
+                            f"(Bot: {bot_id}, Chat: {chat_id_int})"
+                        )
+                    else:
+                        logger.warning(f"⚠️ telegram_id inválido: {user_telegram_id}")
                     
                 except Exception as e:
                     logger.error(f"❌ [REMARKETING] Erro ao agendar: {e}")
@@ -2968,41 +3295,45 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             tid_clean = user_clean
 
         # Modo Teste
-        if not pushin_token:
-            fake_txid = str(uuid.uuid4())
-            novo_pedido = Pedido(
-                bot_id=data.bot_id, telegram_id=tid_clean, first_name=data.first_name, username=user_clean,   
-                valor=data.valor, status='pending', plano_id=data.plano_id, plano_nome=data.plano_nome,
-                txid=fake_txid, qr_code="pix-fake-copia-cola", transaction_id=fake_txid, tem_order_bump=data.tem_order_bump
-            )
-            db.add(novo_pedido)
-            db.commit()
-            db.refresh(novo_pedido)
-            
-            # ============================================================
-            # 🎯 INTEGRAÇÃO: AGENDAR REMARKETING (MODO TESTE)
-            # ============================================================
-            try:
-                # Converte telegram_id para int (necessário para o sistema de remarketing)
-                chat_id_int = int(tid_clean) if tid_clean.isdigit() else hash(tid_clean) % 1000000000
-                
-                # Agenda remarketing + mensagens alternantes
-                schedule_remarketing_and_alternating(
+            if not pushin_token:
+                fake_txid = str(uuid.uuid4())
+                novo_pedido = Pedido(
                     bot_id=data.bot_id,
-                    chat_id=chat_id_int,
-                    payment_message_id=0,  # Modo teste - não tem mensagem real
-                    user_info={
-                        'first_name': data.first_name,
-                        'plano': data.plano_nome,
-                        'valor': data.valor
-                    }
+                    telegram_id=tid_clean,
+                    first_name=data.first_name,
+                    username=user_clean,   
+                    valor=data.valor,
+                    status='pending',
+                    plano_id=data.plano_id,
+                    plano_nome=data.plano_nome,
+                    txid=fake_txid,
+                    qr_code="pix-fake-copia-cola",
+                    transaction_id=fake_txid,
+                    tem_order_bump=data.tem_order_bump
                 )
-                logger.info(f"📧 [REMARKETING] Agendado para {data.first_name} (teste)")
-            except Exception as e:
-                logger.error(f"❌ [REMARKETING] Erro ao agendar (teste): {e}")
-            # ============================================================
-            
-            return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
+                db.add(novo_pedido)
+                db.commit()
+                db.refresh(novo_pedido)
+                
+                # ✅ Agenda remarketing (MODO TESTE)
+                try:
+                    chat_id_int = int(tid_clean) if tid_clean.isdigit() else hash(tid_clean) % 1000000000
+                    
+                    schedule_remarketing_and_alternating(
+                        bot_id=data.bot_id,
+                        chat_id=chat_id_int,
+                        payment_message_id=0,
+                        user_info={
+                            'first_name': data.first_name,
+                            'plano': data.plano_nome,
+                            'valor': data.valor
+                        }
+                    )
+                    logger.info(f"📧 Remarketing agendado (teste): {data.first_name}")
+                except Exception as e:
+                    logger.error(f"❌ Erro ao agendar remarketing (teste): {e}")
+                
+                return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
         # 3. Payload Básico
         valor_total_centavos = int(data.valor * 100)
@@ -3059,14 +3390,45 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             copia_cola = resp.get('qr_code_text') or resp.get('pixCopiaEcola')
             qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
 
+        # Sucesso na geração do PIX
             novo_pedido = Pedido(
-                bot_id=data.bot_id, telegram_id=tid_clean, first_name=data.first_name, username=user_clean,
-                valor=data.valor, status='pending', plano_id=data.plano_id, plano_nome=data.plano_nome,
-                txid=txid, qr_code=qr_image, transaction_id=txid, tem_order_bump=data.tem_order_bump
+                bot_id=data.bot_id,
+                telegram_id=tid_clean,
+                first_name=data.first_name,
+                username=user_clean,
+                valor=data.valor,
+                status='pending',
+                plano_id=data.plano_id,
+                plano_nome=data.plano_nome,
+                txid=txid,
+                qr_code=qr_image,
+                transaction_id=txid,
+                tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
             db.refresh(novo_pedido)
+            
+            # ✅ Agenda remarketing (PRODUÇÃO)
+            try:
+                chat_id_int = int(tid_clean) if tid_clean.isdigit() else hash(tid_clean) % 1000000000
+                
+                schedule_remarketing_and_alternating(
+                    bot_id=data.bot_id,
+                    chat_id=chat_id_int,
+                    payment_message_id=0,
+                    user_info={
+                        'first_name': data.first_name,
+                        'plano': data.plano_nome,
+                        'valor': data.valor
+                    }
+                )
+                logger.info(f"📧 Remarketing agendado: {data.first_name}")
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao agendar remarketing: {e}")
+            
+            return {"txid": txid, "copia_cola": copia_cola, "qr_code": qr_image}
             
             # ============================================================
             # 🎯 INTEGRAÇÃO: AGENDAR REMARKETING (PRODUÇÃO)
@@ -4808,23 +5170,27 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             pedido.status_funil = 'fundo'
             pedido.pagou_em = now
             
-            # Converter Lead em Cliente
-            try:
-                lead = db.query(Lead).filter(
-                    Lead.bot_id == pedido.bot_id,
-                    Lead.user_id == pedido.telegram_id
-                ).first()
-                
-                if lead:
-                    lead.status = "convertido"
-                    lead.funil_stage = "cliente"
-                    lead.expiration_date = data_validade
-                    logger.info(f"✅ Lead {lead.username} convertido em cliente")
-            except Exception as e_lead:
-                logger.error(f"⚠️ Erro ao converter Lead: {e_lead}")
-            
             db.commit()
             
+            # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
+            try:
+                chat_id_int = int(pedido.telegram_id) if str(pedido.telegram_id).isdigit() else None
+                
+                if chat_id_int:
+                    # Cancela timers
+                    with remarketing_lock:
+                        if chat_id_int in remarketing_timers:
+                            remarketing_timers[chat_id_int].cancel()
+                            del remarketing_timers[chat_id_int]
+                        
+                        if chat_id_int in alternating_tasks:
+                            alternating_tasks[chat_id_int].cancel()
+                            del alternating_tasks[chat_id_int]
+                    
+                    logger.info(f"✅ Remarketing cancelado: {chat_id_int}")
+            except Exception as e:
+                logger.error(f"⚠️ Erro ao cancelar remarketing: {e}")
+
             # Atualizar Tracking
             if pedido.tracking_id:
                 try:
@@ -5342,44 +5708,66 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
                 else:
-                    # PIX DIRETO
-                    # 👇 ADICIONE ESTAS 2 LINHAS OBRIGATORIAMENTE 👇
+                    # PIX DIRETO (SEM ORDER BUMP)
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
                     
-                    # ✅ CHAMADA CORRETA
+                    # Gera PIX com remarketing integrado
                     pix = await gerar_pix_pushinpay(
                         valor_float=plano.preco_atual,
-                        transaction_id=mytx,  # Agora 'mytx' existe!
+                        transaction_id=mytx,
                         bot_id=bot_db.id,
                         db=db,
-                        user_telegram_id=str(chat_id),
-                        user_first_name=first_name,
-                        plano_nome=plano.nome_exibicao
+                        user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
+                        user_first_name=first_name,      # ✅ PASSA NOME
+                        plano_nome=plano.nome_exibicao   # ✅ PASSA PLANO
                     )
 
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
+                        # Salva pedido
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                            plano_nome=plano.nome_exibicao, plano_id=plano.id, valor=plano.preco_atual,
-                            transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=plano.nome_exibicao,
+                            plano_id=plano.id,
+                            valor=plano.preco_atual,
+                            transaction_id=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=datetime.utcnow(),
                             tracking_id=track_id_pedido
                         )
                         db.add(novo_pedido)
                         db.commit()
                         
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
                         
                         markup_pix = types.InlineKeyboardMarkup()
-                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
 
-                        msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
+                        msg_pix = (
+                            f"🌟 Seu pagamento foi gerado:\n"
+                            f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            f"💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n"
+                            f"🔐 Pix Copia e Cola:\n\n"
+                            f"<pre>{qr}</pre>\n\n"
+                            f"👆 Toque na chave PIX para copiar\n"
+                            f"⚡ Acesso liberado automaticamente!"
+                        )
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
+                        # ✅ REMARKETING JÁ FOI AGENDADO dentro de gerar_pix_pushinpay()
+                        
                     else:
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
@@ -5395,8 +5783,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
                 
                 if bump and bump.autodestruir:
-                    try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
-                    except: pass
+                    try:
+                        bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                    except:
+                        pass
                 
                 valor_final = plano.preco_atual
                 nome_final = plano.nome_exibicao
@@ -5404,43 +5794,65 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     valor_final += bump.preco
                     nome_final += f" + {bump.nome_produto}"
                 
-                # 👇 ADICIONE ESTAS 2 LINHAS OBRIGATORIAMENTE 👇
                 msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
                 mytx = str(uuid.uuid4())
 
-                # ✅ CHAMADA CORRETA
+                # Gera PIX com remarketing integrado
                 pix = await gerar_pix_pushinpay(
                     valor_float=valor_final,
-                    transaction_id=mytx,  # Agora 'mytx' existe!
+                    transaction_id=mytx,
                     bot_id=bot_db.id,
                     db=db,
-                    user_telegram_id=str(chat_id),
-                    user_first_name=first_name,
-                    plano_nome=nome_final
+                    user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
+                    user_first_name=first_name,      # ✅ PASSA NOME
+                    plano_nome=nome_final            # ✅ PASSA PLANO
                 )
                 
                 if pix:
                     qr = pix.get('qr_code_text') or pix.get('qr_code')
                     txid = str(pix.get('id') or mytx).lower()
                     
+                    # Salva pedido
                     novo_pedido = Pedido(
-                        bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                        plano_nome=nome_final, plano_id=plano.id, valor=valor_final,
-                        transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=aceitou, created_at=datetime.utcnow(),
+                        bot_id=bot_db.id,
+                        telegram_id=str(chat_id),
+                        first_name=first_name,
+                        username=username,
+                        plano_nome=nome_final,
+                        plano_id=plano.id,
+                        valor=valor_final,
+                        transaction_id=txid,
+                        qr_code=qr,
+                        status="pending",
+                        tem_order_bump=aceitou,
+                        created_at=datetime.utcnow(),
                         tracking_id=track_id_pedido
                     )
                     db.add(novo_pedido)
                     db.commit()
                     
-                    try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                    except: pass
+                    try:
+                        bot_temp.delete_message(chat_id, msg_wait.message_id)
+                    except:
+                        pass
                     
                     markup_pix = types.InlineKeyboardMarkup()
-                    markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
+                    markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
 
-                    msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{nome_final}</b>\n💰 Valor: <b>R$ {valor_final:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
+                    msg_pix = (
+                        f"🌟 Pagamento gerado:\n"
+                        f"🎁 Plano: <b>{nome_final}</b>\n"
+                        f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n"
+                        f"🔐 Pix Copia e Cola:\n\n"
+                        f"<pre>{qr}</pre>\n\n"
+                        f"👆 Toque para copiar\n"
+                        f"⚡ Acesso automático!"
+                    )
 
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                    
+                    # ✅ REMARKETING JÁ FOI AGENDADO dentro de gerar_pix_pushinpay()
+                    
                 else:
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
