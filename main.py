@@ -5616,6 +5616,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         pass
 
+
+    except Exception as e:
+        logger.error(f"Erro no webhook: {e}")
+
+    return {"status": "ok"}
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
