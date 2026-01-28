@@ -24,7 +24,6 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
-    turnstile_token = Column(String, nullable=True)
     pushin_pay_id = Column(String, nullable=True)
     taxa_venda = Column(Float, default=10.0)
     is_super_admin = Column(Boolean, default=False)
