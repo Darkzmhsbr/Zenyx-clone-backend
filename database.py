@@ -317,13 +317,10 @@ class BotFlowStep(Base):
 # CLASSES ADICIONAIS DO SISTEMA
 # =========================================================
 class SystemConfig(Base):
-    """Configurações do sistema - ADAPTADO AO SCHEMA EXISTENTE"""
     __tablename__ = "system_config"
-    __table_args__ = {'extend_existing': True}
-    
     key = Column(String(100), primary_key=True, index=True)
     value = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)  # ❌ NÃO EXISTE
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class BotAdmin(Base):
