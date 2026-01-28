@@ -316,12 +316,16 @@ class BotFlowStep(Base):
 # =========================================================
 # CLASSES ADICIONAIS DO SISTEMA
 # =========================================================
+# =========================================================
+# ⚙️ CONFIGURAÇÕES GERAIS (V5.1.1 - Cache Fix)
+# =========================================================
 class SystemConfig(Base):
     __tablename__ = "system_config"
-    key = Column(String(100), primary_key=True, index=True)
-    value = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)  # ❌ NÃO EXISTE
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = {'extend_existing': True}  # Força redefinição anti-cache
+    
+    key = Column(String, primary_key=True, index=True) 
+    value = Column(String)                             
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
