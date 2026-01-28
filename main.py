@@ -2,6 +2,7 @@ import os
 import logging
 import telebot
 from telebot import TeleBot  # ← ADICIONADO: Import explícito do TeleBot
+from telebot.apihelper import ApiTelegramException  # ✅ ADICIONAR
 import httpx
 import time
 import urllib.parse
@@ -11,7 +12,7 @@ import json
 import uuid
 from sqlalchemy.exc import IntegrityError
 
-from sqlalchemy import func, desc, text
+from sqlalchemy import func, desc, text, and_, or_  # ✅ ADICIONAR and_, or_
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -61,10 +62,11 @@ from database import (
     User, 
     engine,
     WebhookRetry,
-    RemarketingConfig,      # ← ADICIONAR
-    AlternatingMessages,    # ← ADICIONAR
-    RemarketingSentLog      # ← ADICIONAR
-)
+    RemarketingConfig,
+    RemarketingLog,           # ✅ USAR ESTE (não RemarketingSentLog)
+    AlternatingMessageState   # ✅ ADICIONAR ESTE
+)     # ← ADICIONAR
+
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -572,6 +574,168 @@ scheduler.add_job(
 logger.info("✅ [SCHEDULER] Job de vencimentos agendado (12h)")
 logger.info("✅ [SCHEDULER] Job de retry de webhooks agendado (1 min)")
 logger.info("✅ [SCHEDULER] Job de cleanup de remarketing agendado (1h)")
+
+
+# ========================================
+# 🔄 JOB: MENSAGENS ALTERNANTES
+# ========================================
+async def enviar_mensagens_alternantes():
+    """
+    Envia mensagens alternantes para leads que não converteram.
+    Roda a cada 1 hora e verifica internamente os intervalos configurados.
+    """
+    db = SessionLocal()
+    try:
+        logger.info("🔄 [ALTERNATING] Iniciando job de mensagens alternantes")
+        
+        # Busca todos os bots ativos
+        bots = db.query(BotModel).filter(BotModel.is_active == True).all()
+        
+        for bot_db in bots:
+            try:
+                # Busca configuração de remarketing
+                config = db.query(RemarketingConfig).filter(
+                    RemarketingConfig.bot_id == bot_db.id
+                ).first()
+                
+                if not config:
+                    logger.debug(f"Bot {bot_db.id}: sem configuração de remarketing")
+                    continue
+                    
+                if not config.alternating_enabled:
+                    logger.debug(f"Bot {bot_db.id}: mensagens alternantes desabilitadas")
+                    continue
+                
+                # Valida se tem mensagens configuradas
+                if not config.alternating_messages or len(config.alternating_messages) == 0:
+                    logger.warning(f"Bot {bot_db.id}: sem mensagens alternantes configuradas")
+                    continue
+                
+                # Busca intervalo (padrão 24h se não definido)
+                intervalo_horas = config.alternating_interval_hours or 24
+                tempo_limite = datetime.utcnow() - timedelta(hours=intervalo_horas)
+                
+                # ✅ QUERY OTIMIZADA COM LEFT JOIN
+                leads_elegiveis = db.query(Lead).outerjoin(
+                    Pedido,
+                    and_(
+                        Lead.user_id == Pedido.telegram_id,
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.status == "paid"
+                    )
+                ).filter(
+                    Lead.bot_id == bot_db.id,
+                    Lead.comprou == False,
+                    Lead.status != "blocked",
+                    Pedido.id == None,  # Não tem pedido pago
+                    Lead.created_at < tempo_limite
+                ).all()
+                
+                if not leads_elegiveis:
+                    logger.debug(f"Bot {bot_db.id}: sem leads elegíveis para mensagens alternantes")
+                    continue
+                
+                logger.info(f"Bot {bot_db.id}: {len(leads_elegiveis)} leads elegíveis para mensagens alternantes")
+                
+                # Inicializa bot do Telegram
+                bot_temp = TeleBot(bot_db.telegram_token, threaded=False)
+                bot_temp.parse_mode = "HTML"
+                
+                enviados = 0
+                bloqueados = 0
+                erros = 0
+                
+                for lead in leads_elegiveis:
+                    try:
+                        # Busca ou cria estado da mensagem alternante
+                        state = db.query(AlternatingMessageState).filter(
+                            AlternatingMessageState.bot_id == bot_db.id,
+                            AlternatingMessageState.user_id == lead.user_id
+                        ).first()
+                        
+                        if not state:
+                            state = AlternatingMessageState(
+                                bot_id=bot_db.id,
+                                user_id=lead.user_id,
+                                last_message_index=-1,  # -1 para enviar a primeira (index 0)
+                                last_sent_at=datetime.utcnow() - timedelta(days=999)
+                            )
+                            db.add(state)
+                            db.commit()
+                            db.refresh(state)
+                        
+                        # Verifica se já passou o intervalo desde o último envio
+                        tempo_desde_ultimo = (datetime.utcnow() - state.last_sent_at).total_seconds()
+                        if tempo_desde_ultimo < (intervalo_horas * 3600):
+                            continue
+                        
+                        # Seleciona próxima mensagem da rotação
+                        mensagens = config.alternating_messages
+                        proximo_index = (state.last_message_index + 1) % len(mensagens)
+                        mensagem_texto = mensagens[proximo_index]
+                        
+                        if not mensagem_texto or mensagem_texto.strip() == "":
+                            continue
+                        
+                        # ✅ ENVIA MENSAGEM COM TRATAMENTO DE BLOQUEIOS
+                        chat_id = int(lead.user_id)
+                        
+                        try:
+                            bot_temp.send_message(
+                                chat_id,
+                                mensagem_texto,
+                                parse_mode="HTML"
+                            )
+                            
+                            # Atualiza estado
+                            state.last_message_index = proximo_index
+                            state.last_sent_at = datetime.utcnow()
+                            db.commit()
+                            
+                            enviados += 1
+                            
+                            # Delay para evitar rate limit
+                            await asyncio.sleep(0.5)
+                            
+                        except ApiTelegramException as e:
+                            error_msg = str(e).lower()
+                            if "bot was blocked" in error_msg or "user is deactivated" in error_msg or "chat not found" in error_msg:
+                                # Marca lead como bloqueado
+                                lead.status = "blocked"
+                                db.commit()
+                                bloqueados += 1
+                                logger.info(f"⚠️ Lead {lead.user_id} bloqueou o bot ou foi desativado")
+                            else:
+                                erros += 1
+                                logger.error(f"⚠️ Erro Telegram para lead {lead.user_id}: {e}")
+                            continue
+                            
+                    except Exception as e_lead:
+                        erros += 1
+                        logger.error(f"⚠️ Erro ao enviar mensagem alternante para lead {lead.user_id}: {str(e_lead)}")
+                        continue
+                
+                logger.info(f"✅ Bot {bot_db.id}: {enviados} enviados, {bloqueados} bloqueados, {erros} erros")
+                        
+            except Exception as e_bot:
+                logger.error(f"❌ Erro ao processar mensagens alternantes do bot {bot_db.id}: {str(e_bot)}", exc_info=True)
+                continue
+                
+    except Exception as e:
+        logger.error(f"❌ Erro crítico no job de mensagens alternantes: {str(e)}", exc_info=True)
+    finally:
+        db.close()
+
+# Agenda o job para rodar a cada 1 hora
+scheduler.add_job(
+    enviar_mensagens_alternantes,
+    'interval',
+    hours=1,
+    id='alternating_messages_job',
+    replace_existing=True
+)
+
+logger.info("✅ [SCHEDULER] Job de mensagens alternantes agendado (1h)")
 
 
 # =========================================================
@@ -5282,80 +5446,175 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 else:
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-            # --- D) PROMO ---
+            # --- D) PROMO (OFERTAS PROMOCIONAIS) ---
             elif data.startswith("promo_"):
-                try: campanha_uuid = data.split("_")[1]
-                except: campanha_uuid = ""
-                
-                campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
-                
-                if not campanha:
-                    bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou expirada.")
-                elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
-                    bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
-                else:
+                try:
+                    # Extrai campaign_id e converte para string normalizada
+                    campanha_uuid = data.split("_")[1].strip()
+                    
+                    # Busca a campanha - tenta com e sem conversão de UUID
+                    campanha = db.query(RemarketingCampaign).filter(
+                        RemarketingCampaign.campaign_id == campanha_uuid
+                    ).first()
+                    
+                    # Se não encontrou, tenta converter para UUID
+                    if not campanha:
+                        try:
+                            import uuid as uuid_lib
+                            campanha_uuid_obj = uuid_lib.UUID(campanha_uuid)
+                            campanha = db.query(RemarketingCampaign).filter(
+                                RemarketingCampaign.campaign_id == str(campanha_uuid_obj)
+                            ).first()
+                        except:
+                            pass
+                    
+                    if not campanha:
+                        bot_temp.send_message(
+                            chat_id, 
+                            "❌ <b>Oferta não encontrada.</b>\n\nEsta promoção pode ter sido removida ou o link está incorreto.",
+                            parse_mode="HTML"
+                        )
+                        return
+                    
+                    # Verifica se está ativa usando o método is_active()
+                    if not campanha.is_active():
+                        # Mensagem específica baseada no motivo
+                        if not campanha.is_enabled:
+                            msg_erro = "🚫 <b>OFERTA DESATIVADA</b>\n\nEsta promoção não está mais disponível."
+                        elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
+                            msg_erro = "⏰ <b>OFERTA EXPIRADA!</b>\n\nO tempo desta promoção acabou."
+                        else:
+                            msg_erro = "❌ <b>Oferta indisponível.</b>"
+                        
+                        bot_temp.send_message(chat_id, msg_erro, parse_mode="HTML")
+                        return
+                    
+                    # Busca o plano
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
-                    if plano:
-                        preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
-                       # 👇 ADICIONE ESTAS 2 LINHAS OBRIGATORIAMENTE 👇
-                        msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
-                        mytx = str(uuid.uuid4())
+                    
+                    if not plano:
+                        bot_temp.send_message(
+                            chat_id,
+                            "❌ <b>Plano não encontrado.</b>\n\nEsta oferta não está mais disponível.",
+                            parse_mode="HTML"
+                        )
+                        return
+                    
+                    # Calcula preço final e desconto
+                    preco_final = campanha.get_promo_price(plano)
+                    desconto_percentual = 0
+                    preco_referencia = plano.preco_original or plano.preco_atual
+                    
+                    if preco_referencia > preco_final:
+                        desconto_percentual = int(((preco_referencia - preco_final) / preco_referencia) * 100)
+                    
+                    # Gera PIX
+                    msg_wait = bot_temp.send_message(
+                        chat_id,
+                        f"⏳ Gerando <b>OFERTA ESPECIAL</b>{f' com {desconto_percentual}% OFF' if desconto_percentual > 0 else ''}...",
+                        parse_mode="HTML"
+                    )
+                    mytx = str(uuid.uuid4())
 
-                        # ✅ CHAMADA CORRETA
-                        pix = await gerar_pix_pushinpay(
-                            valor_float=preco_final,
-                            transaction_id=mytx,  # Agora 'mytx' existe!
+                    pix = await gerar_pix_pushinpay(
+                        valor_float=preco_final,
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),
+                        user_first_name=first_name,
+                        plano_nome=f"{plano.nome_exibicao} (PROMO)"
+                    )
+                    
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
+                        # Registra pedido com tracking da campanha
+                        novo_pedido = Pedido(
                             bot_id=bot_db.id,
-                            db=db,
-                            user_telegram_id=str(chat_id),
-                            user_first_name=first_name,
-                            plano_nome=f"{plano.nome_exibicao} (OFERTA)"
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"{plano.nome_exibicao} (OFERTA ESPECIAL)",
+                            plano_id=plano.id,
+                            valor=preco_final,
+                            transaction_id=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=datetime.utcnow(),
+                            tracking_id=campanha.campaign_id
+                        )
+                        db.add(novo_pedido)
+                        db.commit()
+                        
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(
+                            types.InlineKeyboardButton(
+                                "🔄 VERIFICAR PAGAMENTO",
+                                callback_data=f"check_payment_{txid}"
+                            )
+                        )
+
+                        emoji_fogo = "🔥" if desconto_percentual >= 50 else "💰"
+                        msg_pix = f"{emoji_fogo} <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        
+                        if desconto_percentual > 0:
+                            msg_pix += f"💵 De: <s>R$ {preco_referencia:.2f}</s>\n"
+                            msg_pix += f"✨ Por apenas: <b>R$ {preco_final:.2f}</b>\n"
+                            msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                        else:
+                            msg_pix += f"💰 Valor: <b>R$ {preco_final:.2f}</b>\n\n"
+                        
+                        msg_pix += f"🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                        msg_pix += "👆 Toque na chave PIX acima para copiar\n"
+                        msg_pix += "⚡ Acesso liberado automaticamente após confirmação!"
+
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
+                        # Registra conversão no log da campanha
+                        try:
+                            log_entry = RemarketingLog(
+                                bot_id=bot_db.id,
+                                campaign_id=campanha.campaign_id,
+                                user_id=str(chat_id),
+                                message_sent=True,
+                                converted=False,
+                                sent_at=datetime.utcnow()
+                            )
+                            db.add(log_entry)
+                            db.commit()
+                        except Exception as log_error:
+                            logger.error(f"Erro ao registrar log de remarketing: {log_error}")
+                            
+                    else:
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        bot_temp.send_message(
+                            chat_id,
+                            "❌ <b>Erro ao gerar pagamento.</b>\n\nTente novamente em instantes.",
+                            parse_mode="HTML"
                         )
                         
-                        if pix:
-                            qr = pix.get('qr_code_text') or pix.get('qr_code')
-                            txid = str(pix.get('id') or mytx).lower()
-                            
-                            novo_pedido = Pedido(
-                                bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                                plano_nome=f"{plano.nome_exibicao} (OFERTA)", plano_id=plano.id, valor=preco_final,
-                                transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
-                                tracking_id=None 
-                            )
-                            db.add(novo_pedido)
-                            db.commit()
-                            
-                            try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                            except: pass
-                            
-                            markup_pix = types.InlineKeyboardMarkup()
-                            markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
-
-                            msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
-
-                            bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
-                        else:
-                            bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
-                    else:
-                        bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
-
-            # --- E) VERIFICAR STATUS ---
-            elif data.startswith("check_payment_"):
-                tx_id = data.split("_")[2]
-                pedido = db.query(Pedido).filter(Pedido.transaction_id == tx_id).first()
-                
-                if not pedido:
-                    bot_temp.answer_callback_query(update.callback_query.id, "❌ Pedido não encontrado.", show_alert=True)
-                elif pedido.status in ['paid', 'approved', 'active']:
-                    bot_temp.answer_callback_query(update.callback_query.id, "✅ Pagamento Aprovado!", show_alert=False)
-                    bot_temp.send_message(chat_id, "✅ <b>O pagamento foi confirmado!</b>\nVerifique se você recebeu o link de acesso nas mensagens anteriores.", parse_mode="HTML")
-                else:
-                    bot_temp.answer_callback_query(update.callback_query.id, "⏳ Pagamento não identificado ainda. Tente novamente.", show_alert=True)
-
-    except Exception as e:
-        logger.error(f"Erro no webhook: {e}")
-
-    return {"status": "ok"}
+                except Exception as e:
+                    logger.error(f"❌ Erro no handler promo_: {str(e)}", exc_info=True)
+                    try:
+                        bot_temp.send_message(
+                            chat_id,
+                            "❌ <b>Erro ao processar oferta.</b>\n\nContate o suporte.",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
 
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
