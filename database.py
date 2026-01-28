@@ -30,7 +30,6 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # ✅ RELACIONAMENTOS VALIDADOS
     bots = relationship("Bot", back_populates="owner")
     audit_logs = relationship("AuditLog", back_populates="user")
 
@@ -50,7 +49,6 @@ class Bot(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # ✅ RELACIONAMENTOS VALIDADOS (incluindo remarketing_config)
     owner = relationship("User", back_populates="bots")
     planos = relationship("PlanoConfig", back_populates="bot")
     pedidos = relationship("Pedido", back_populates="bot")
@@ -59,7 +57,7 @@ class Bot(Base):
     steps = relationship("BotFlowStep", back_populates="bot")
     order_bump = relationship("OrderBumpConfig", back_populates="bot", uselist=False)
     remarketing_campaigns = relationship("RemarketingCampaign", back_populates="bot")
-    remarketing_config = relationship("RemarketingConfig", back_populates="bot", uselist=False)  # ⚠️ NOVO
+    remarketing_config = relationship("RemarketingConfig", back_populates="bot", uselist=False)
 
 # =========================================================
 # 💲 PLANOS
@@ -72,10 +70,10 @@ class PlanoConfig(Base):
     nome_exibicao = Column(String(100))
     descricao = Column(Text)
     preco_atual = Column(Float)
-    preco_original = Column(Float, nullable=True)  # ✅ VALIDADO
+    preco_original = Column(Float, nullable=True)
     preco_cheio = Column(Float, nullable=True)
     dias_duracao = Column(Integer, default=30)
-    is_lifetime = Column(Boolean, default=False)  # ✅ VALIDADO
+    is_lifetime = Column(Boolean, default=False)
     key_id = Column(String(100), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -122,7 +120,7 @@ class Lead(Base):
     ultima_interacao = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     tracking_id = Column(String(100), nullable=True)
-    status = Column(String(20), default="active")  # ✅ VALIDADO
+    status = Column(String(20), default="active")
     
     bot = relationship("Bot", back_populates="leads")
 
@@ -148,25 +146,17 @@ class OrderBumpConfig(Base):
 
 # =========================================================
 # 📢 REMARKETING - CONFIGURAÇÕES GLOBAIS
-# ⚠️ ESTA CLASSE É NOVA E CRÍTICA PARA O SISTEMA
 # =========================================================
 class RemarketingConfig(Base):
-    """
-    Configurações globais de remarketing por bot.
-    Esta tabela armazena as preferências de envio automático
-    e mensagens alternantes que são aplicadas a todas as campanhas.
-    """
     __tablename__ = "remarketing_config"
     
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
     
-    # Configurações de Mensagens Alternantes
     alternating_enabled = Column(Boolean, default=False)
-    alternating_messages = Column(JSON, default=list)  # Array de strings
+    alternating_messages = Column(JSON, default=list)
     alternating_interval_hours = Column(Integer, default=24)
     
-    # Configurações de Campanhas Automáticas
     auto_send_enabled = Column(Boolean, default=False)
     auto_send_delay_hours = Column(Integer, default=24)
     
@@ -185,26 +175,21 @@ class RemarketingCampaign(Base):
     bot_id = Column(Integer, ForeignKey("bots.id"))
     campaign_id = Column(String, unique=True)
     
-    # Configuração
     target = Column(String, default="todos")
     type = Column(String, default="massivo")
     config = Column(Text)
     
-    # Status e Controle
     status = Column(String, default="agendado")
-    is_enabled = Column(Boolean, default=True)  # ✅ VALIDADO
+    is_enabled = Column(Boolean, default=True)
     
-    # Agendamento
     dia_atual = Column(Integer, default=0)
     data_inicio = Column(DateTime, default=datetime.utcnow)
     proxima_execucao = Column(DateTime, nullable=True)
     
-    # Oferta Promocional
     plano_id = Column(Integer, nullable=True)
     promo_price = Column(Float, nullable=True)
     expiration_at = Column(DateTime, nullable=True)
     
-    # Métricas
     total_leads = Column(Integer, default=0)
     sent_success = Column(Integer, default=0)
     blocked_count = Column(Integer, default=0)
@@ -212,9 +197,7 @@ class RemarketingCampaign(Base):
     
     bot = relationship("Bot", back_populates="remarketing_campaigns")
     
-    # ✅ MÉTODOS AUXILIARES VALIDADOS
     def is_active(self) -> bool:
-        """Verifica se a campanha está ativa e não expirada"""
         if not self.is_enabled:
             return False
         if self.expiration_at and datetime.utcnow() > self.expiration_at:
@@ -222,7 +205,6 @@ class RemarketingCampaign(Base):
         return True
     
     def get_promo_price(self, plano: 'PlanoConfig') -> float:
-        """Retorna o preço promocional ou preço padrão do plano"""
         if self.promo_price is not None and self.promo_price > 0:
             return self.promo_price
         return plano.preco_atual if plano else 0.0
@@ -262,10 +244,6 @@ class AlternatingMessageState(Base):
 # 🔄 WEBHOOK RETRY SYSTEM
 # =========================================================
 class WebhookRetry(Base):
-    """
-    Rastreia webhooks que falharam e precisam ser reprocessados.
-    Implementa exponential backoff automático.
-    """
     __tablename__ = "webhook_retry"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -279,12 +257,9 @@ class WebhookRetry(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_error = Column(Text, nullable=True)
     reference_id = Column(String(100), nullable=True)
-    
-    def __repr__(self):
-        return f"<WebhookRetry(id={self.id}, type={self.webhook_type}, attempts={self.attempts}, status={self.status})>"
 
 # =========================================================
-# 💬 FLUXO (ESTRUTURA HÍBRIDA)
+# 💬 FLUXO
 # =========================================================
 class BotFlow(Base):
     __tablename__ = "bot_flows"
@@ -306,9 +281,6 @@ class BotFlow(Base):
     msg_2_media = Column(String, nullable=True)
     mostrar_planos_2 = Column(Boolean, default=False)
 
-# =========================================================
-# 🧩 TABELA DE PASSOS INTERMEDIÁRIOS
-# =========================================================
 class BotFlowStep(Base):
     __tablename__ = "bot_flow_steps"
     id = Column(Integer, primary_key=True, index=True)
@@ -326,9 +298,89 @@ class BotFlowStep(Base):
     bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
-# 📝 AUDIT LOG
+# 🔧 CLASSES ADICIONAIS DO SISTEMA ORIGINAL
 # =========================================================
+
+class SystemConfig(Base):
+    """Configurações do sistema"""
+    __tablename__ = "system_config"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(100), unique=True)
+    value = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class BotAdmin(Base):
+    """Administradores de bots"""
+    __tablename__ = "bot_admins"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
+    telegram_id = Column(String(50))
+    nome = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class TrackingFolder(Base):
+    """Pastas de tracking"""
+    __tablename__ = "tracking_folders"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
+    nome = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class TrackingLink(Base):
+    """Links de tracking"""
+    __tablename__ = "tracking_links"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    folder_id = Column(Integer, ForeignKey("tracking_folders.id"), nullable=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
+    nome = Column(String(100))
+    url = Column(String(500))
+    tracking_id = Column(String(100), unique=True)
+    clicks = Column(Integer, default=0)
+    conversoes = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class MiniAppConfig(Base):
+    """Configuração de Mini Apps"""
+    __tablename__ = "miniapp_config"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    enabled = Column(Boolean, default=False)
+    store_name = Column(String(100))
+    store_description = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class MiniAppCategory(Base):
+    """Categorias de Mini Apps"""
+    __tablename__ = "miniapp_categories"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    miniapp_id = Column(Integer, ForeignKey("miniapp_config.id"))
+    nome = Column(String(100))
+    descricao = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Notification(Base):
+    """Notificações do sistema"""
+    __tablename__ = "notifications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    title = Column(String(200))
+    message = Column(Text)
+    type = Column(String(50), default="info")
+    read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User")
+
 class AuditLog(Base):
+    """Log de auditoria"""
     __tablename__ = "audit_logs"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -343,56 +395,46 @@ class AuditLog(Base):
     user = relationship("User", back_populates="audit_logs")
 
 # =========================================================
-# 🔧 FUNÇÃO DE MIGRAÇÃO FORÇADA
+# 🔧 MIGRAÇÃO AUTOMÁTICA
 # =========================================================
 def forcar_atualizacao_tabelas():
-    """
-    Força a criação/atualização de colunas sem usar Alembic.
-    Útil para adicionar colunas que faltam em produção.
-    """
     from sqlalchemy import inspect
     
     inspector = inspect(engine)
     
-    # Adicionar coluna is_lifetime se não existir
     if 'plano_config' in inspector.get_table_names():
         columns = [c['name'] for c in inspector.get_columns('plano_config')]
         if 'is_lifetime' not in columns:
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE plano_config ADD COLUMN is_lifetime BOOLEAN DEFAULT FALSE"))
                 conn.commit()
-                print("✅ Coluna 'is_lifetime' adicionada à tabela plano_config")
+                print("✅ Coluna 'is_lifetime' adicionada")
         if 'preco_original' not in columns:
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE plano_config ADD COLUMN preco_original FLOAT"))
                 conn.commit()
-                print("✅ Coluna 'preco_original' adicionada à tabela plano_config")
+                print("✅ Coluna 'preco_original' adicionada")
     
-    # Adicionar coluna is_enabled se não existir
     if 'remarketing_campaigns' in inspector.get_table_names():
         columns = [c['name'] for c in inspector.get_columns('remarketing_campaigns')]
         if 'is_enabled' not in columns:
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE remarketing_campaigns ADD COLUMN is_enabled BOOLEAN DEFAULT TRUE"))
                 conn.commit()
-                print("✅ Coluna 'is_enabled' adicionada à tabela remarketing_campaigns")
+                print("✅ Coluna 'is_enabled' adicionada")
     
-    # Adicionar coluna status em leads se não existir
     if 'leads' in inspector.get_table_names():
         columns = [c['name'] for c in inspector.get_columns('leads')]
         if 'status' not in columns:
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE leads ADD COLUMN status VARCHAR(20) DEFAULT 'active'"))
                 conn.commit()
-                print("✅ Coluna 'status' adicionada à tabela leads")
+                print("✅ Coluna 'status' adicionada")
 
-# =========================================================
-# 🚀 CRIAÇÃO DAS TABELAS
-# =========================================================
 def init_db():
     Base.metadata.create_all(bind=engine)
     forcar_atualizacao_tabelas()
-    print("✅ Banco de dados inicializado com sucesso!")
+    print("✅ Banco de dados inicializado!")
 
 if __name__ == "__main__":
     init_db()
