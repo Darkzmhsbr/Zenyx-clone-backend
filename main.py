@@ -6499,100 +6499,131 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
             # --- D) PROMO (Campanhas Manuais / Antigas) ---
-            # Lógica restaurada e adaptada para o novo sistema de PIX Async
+           # --- D) PROMO (Lógica Restaurada da V14 + Adaptação Async) ---
             elif data.startswith("promo_"):
-                try: 
-                    campanha_uuid = data.split("_")[1]
-                except: 
-                    campanha_uuid = ""
-                
-                # Busca usando a lógica antiga (UUID) que é a correta para essa rota
-                campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
-                
-                # Verifica validade (Lógica antiga restaurada: sem .is_active())
-                if not campanha:
-                    bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou expirada.")
-                elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
-                    bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
-                else:
+                try:
+                    # 1. Extração do UUID (Igual ao main (14).py)
+                    try: 
+                        campanha_uuid = data.split("_")[1]
+                    except: 
+                        campanha_uuid = ""
+                    
+                    # 2. Busca a Campanha pelo UUID (Coluna 'campaign_id')
+                    campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
+                    
+                    # 3. Validações (Lógica original recuperada)
+                    if not campanha:
+                        bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou link inválido.")
+                        return {"status": "error"}
+                    
+                    # Verifica validade (expiration_at) - Igual à versão 14
+                    if campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
+                        bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
+                        return {"status": "expired"}
+                    
+                    # 4. Busca o Plano
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
                     
-                    if plano:
-                        preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
-                        
-                        # Calcula desconto visual para ficar bonito
-                        desconto_percentual = 0
-                        if plano.preco_atual > preco_final:
-                            desconto_percentual = int(((plano.preco_atual - preco_final) / plano.preco_atual) * 100)
+                    if not plano:
+                        bot_temp.send_message(chat_id, "❌ O plano desta oferta não existe mais.")
+                        return {"status": "error"}
 
-                        msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
-                        mytx = str(uuid.uuid4())
-                        
-                        # 🔥 ADAPTAÇÃO CRUCIAL: Usando o novo formato do gerador de PIX (Async + Novos Parâmetros)
+                    # 5. Define Preço (Promo ou Original)
+                    # Lógica da v14: Se tiver promo_price, usa ele. Se não, usa o do plano.
+                    preco_final = float(campanha.promo_price) if (campanha.promo_price and campanha.promo_price > 0) else float(plano.preco_atual)
+                    
+                    # 6. Calcula desconto visual (Apenas estético)
+                    desconto_percentual = 0
+                    if plano.preco_atual > preco_final:
+                        try:
+                            desconto_percentual = int(((plano.preco_atual - preco_final) / plano.preco_atual) * 100)
+                        except:
+                            desconto_percentual = 0
+
+                    # Avisa o usuário (Onde estava travando antes)
+                    msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
+                    
+                    mytx = str(uuid.uuid4())
+                    
+                    # ==============================================================================
+                    # 🔥 O PULO DO GATO: Adaptação para o Novo Sistema Async
+                    # Aqui usamos o 'await' e passamos TODOS os parâmetros que o main.py atual exige
+                    # ==============================================================================
+                    try:
                         pix = await gerar_pix_pushinpay(
                             valor_float=preco_final,
                             transaction_id=mytx,
-                            bot_id=bot_db.id,
-                            db=db,
-                            user_telegram_id=str(chat_id),
-                            user_first_name=first_name,
+                            bot_id=bot_db.id,              # ID do bot atual
+                            db=db,                         # Sessão do banco
+                            user_telegram_id=str(chat_id), # ID do usuário
+                            user_first_name=first_name,    # Nome para o gateway
                             plano_nome=f"{plano.nome_exibicao} (OFERTA)",
-                            agendar_remarketing=False # Não ativa o remarketing automático em cima de campanha manual
+                            agendar_remarketing=False      # IMPORTANTE: False para não criar loop infinito
                         )
+                    except Exception as e_pix:
+                        logger.error(f"❌ Erro CRÍTICO ao gerar PIX Async: {e_pix}", exc_info=True)
+                        bot_temp.send_message(chat_id, "❌ Erro interno ao comunicar com o banco.")
+                        return {"status": "error"}
+
+                    # 7. Processa o Retorno (Igual ao main (14).py mas com estrutura atual)
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
                         
-                        if pix:
-                            qr = pix.get('qr_code_text') or pix.get('qr_code')
-                            txid = str(pix.get('id') or mytx).lower()
-                            
-                            # Salva o pedido
-                            novo_pedido = Pedido(
-                                bot_id=bot_db.id, 
-                                telegram_id=str(chat_id), 
-                                first_name=first_name, 
-                                username=username,
-                                plano_nome=f"{plano.nome_exibicao} (OFERTA)", 
-                                plano_id=plano.id, 
-                                valor=preco_final,
-                                transaction_id=txid, 
-                                qr_code=qr, 
-                                status="pending", 
-                                tem_order_bump=False, 
-                                created_at=datetime.utcnow(),
-                                tracking_id=None 
-                            )
-                            db.add(novo_pedido)
-                            
-                            # Atualiza contador de cliques da campanha
+                        # Cria o pedido no banco
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id, 
+                            telegram_id=str(chat_id), 
+                            first_name=first_name, 
+                            username=username,
+                            plano_nome=f"{plano.nome_exibicao} (OFERTA)", 
+                            plano_id=plano.id, 
+                            valor=preco_final,
+                            transaction_id=txid, 
+                            qr_code=qr, 
+                            status="pending", 
+                            tem_order_bump=False, 
+                            created_at=datetime.utcnow(),
+                            tracking_id=None 
+                        )
+                        db.add(novo_pedido)
+                        
+                        # Incrementa contador de cliques na campanha (Analytics)
+                        if campanha:
                             if not campanha.clicks: campanha.clicks = 0
                             campanha.clicks += 1
-                            
-                            db.commit()
-                            
-                            try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                            except: pass
-                            
-                            markup_pix = types.InlineKeyboardMarkup()
-                            markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
+                        
+                        db.commit()
+                        
+                        # Tenta apagar a mensagem de "Gerando..."
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        
+                        # Monta o botão e a mensagem final
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
-                            msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
-                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                            
-                            if desconto_percentual > 0:
-                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                                msg_pix += f"✨ Por: <b>R$ {preco_final:.2f}</b>\n"
-                                msg_pix += f"📉 Economia: <b>{desconto_percentual}% OFF</b>\n"
-                            else:
-                                msg_pix += f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n"
-                                
-                            msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
-
-                            bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
+                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        
+                        if desconto_percentual > 0:
+                            msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            msg_pix += f"✨ Por: <b>R$ {preco_final:.2f}</b>\n"
+                            msg_pix += f"📉 Economia: <b>{desconto_percentual}% OFF</b>\n"
                         else:
-                            try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                            except: pass
-                            bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+                            msg_pix += f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n"
+                            
+                        msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
+
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     else:
-                        bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar o QRCode do PIX. Tente novamente.")
+
+                except Exception as e:
+                    logger.error(f"❌ Erro GERAL no handler promo_: {e}", exc_info=True)
+                    bot_temp.send_message(chat_id, "❌ Ocorreu um erro ao processar sua solicitação.")
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
