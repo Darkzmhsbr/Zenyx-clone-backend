@@ -219,16 +219,16 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
     """
     Envia o disparo automático de remarketing após o tempo configurado.
     Inclui mídia, texto e botões com valores promocionais.
-    CORRIGIDO: Agora usa 'user_id' no log para evitar erro de coluna inexistente.
+    ✅ CORRIGIDO: Auto-destruição agora é OPCIONAL e só acontece APÓS clicar no botão
     """
     try:
         # Remove do set de timers ativos para evitar vazamento de memória
         if chat_id in remarketing_timers:
             remarketing_timers.pop(chat_id, None)
         
-        # Verifica se já enviou nesta sessão
+        # ✅ BLOQUEIO: Verifica se já enviou nesta sessão
         if chat_id in usuarios_com_remarketing_enviado:
-            logger.info(f"⏭️ Remarketing já enviado para {chat_id}")
+            logger.info(f"⏭️ Remarketing já enviado para {chat_id}, bloqueando reenvio")
             return
         
         db = SessionLocal()
@@ -310,26 +310,28 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             markup.add(botao)
         
         # Envia botões (em mensagem separada para garantir visibilidade)
+        buttons_message_id = None
         try:
-            bot_instance.send_message(
+            buttons_msg = bot_instance.send_message(
                 chat_id,
                 "👇 Escolha seu plano com desconto:",
                 reply_markup=markup
             )
+            buttons_message_id = buttons_msg.message_id
         except Exception as e:
             logger.error(f"Erro ao enviar botões: {e}")
         
-        # Marca como enviado
+        # ✅ MARCA COMO ENVIADO PARA BLOQUEAR REENVIO
         usuarios_com_remarketing_enviado.add(chat_id)
         
-        # Registra no log (CORREÇÃO DE COLUNA AQUI)
+        # Registra no log
         db = SessionLocal()
         try:
             log = RemarketingLog(
                 bot_id=bot_id,
-                user_id=str(chat_id), # ✅ CORRIGIDO: Era user_telegram_id, agora é user_id
+                user_id=str(chat_id),
                 sent_at=datetime.utcnow(),
-                message_sent=mensagem,  # ✅ CORRIGIDO: era message_text
+                message_sent=mensagem,
                 promo_values=promo_values,
                 status='sent'
             )
@@ -337,21 +339,38 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             db.commit()
         except Exception as e_log:
             logger.error(f"❌ Erro ao salvar log de remarketing: {e_log}")
-            db.rollback()  # ✅ Adicione rollback em caso de erro
+            db.rollback()
         finally:
             db.close()
         
-        # Auto-destruir se configurado
-        if config.auto_destruct_seconds > 0 and message_id:
-            def auto_delete():
-                time.sleep(config.auto_destruct_seconds)
-                try:
-                    bot_instance.delete_message(chat_id, message_id)
-                    logger.debug(f"🗑️ Mensagem de remarketing auto-destruída")
-                except:
-                    pass
-            
-            threading.Thread(target=auto_delete, daemon=True).start()
+        # ✅ NOVA LÓGICA: Auto-destruição OPCIONAL e APÓS CLIQUE
+        if config.auto_destruct_enabled and message_id:
+            if config.auto_destruct_after_click:
+                # Salva o message_id para destruir DEPOIS do clique
+                # Vamos armazenar em um dict global temporário
+                if not hasattr(enviar_remarketing_automatico, 'pending_destructions'):
+                    enviar_remarketing_automatico.pending_destructions = {}
+                
+                enviar_remarketing_automatico.pending_destructions[chat_id] = {
+                    'message_id': message_id,
+                    'buttons_message_id': buttons_message_id,
+                    'bot_instance': bot_instance,
+                    'destruct_seconds': config.auto_destruct_seconds
+                }
+                logger.info(f"💣 Auto-destruição agendada APÓS clique para {chat_id}")
+            else:
+                # Auto-destrói imediatamente (comportamento antigo)
+                def auto_delete():
+                    time.sleep(config.auto_destruct_seconds)
+                    try:
+                        bot_instance.delete_message(chat_id, message_id)
+                        if buttons_message_id:
+                            bot_instance.delete_message(chat_id, buttons_message_id)
+                        logger.debug(f"🗑️ Mensagem de remarketing auto-destruída")
+                    except:
+                        pass
+                
+                threading.Thread(target=auto_delete, daemon=True).start()
         
         logger.info(f"✅ [REMARKETING] Enviado com sucesso para {chat_id} (bot {bot_id})")
         
@@ -1585,7 +1604,9 @@ def get_auto_remarketing_config(
                 "media_url": None,
                 "media_type": None,
                 "delay_minutes": 5,
-                "auto_destruct_seconds": 0,
+                "auto_destruct_enabled": False,
+                "auto_destruct_seconds": 3,
+                "auto_destruct_after_click": True,
                 "promo_values": {}
             }
         
@@ -1597,7 +1618,9 @@ def get_auto_remarketing_config(
             "media_url": config.media_url,
             "media_type": config.media_type,
             "delay_minutes": config.delay_minutes,
+            "auto_destruct_enabled": config.auto_destruct_enabled,
             "auto_destruct_seconds": config.auto_destruct_seconds,
+            "auto_destruct_after_click": config.auto_destruct_after_click,
             "promo_values": config.promo_values or {},
             "created_at": config.created_at.isoformat() if config.created_at else None,
             "updated_at": config.updated_at.isoformat() if config.updated_at else None
@@ -1641,7 +1664,9 @@ def save_auto_remarketing_config(
             config.media_url = data.get("media_url", config.media_url)
             config.media_type = data.get("media_type", config.media_type)
             config.delay_minutes = delay_minutes
+            config.auto_destruct_enabled = data.get("auto_destruct_enabled", config.auto_destruct_enabled)
             config.auto_destruct_seconds = data.get("auto_destruct_seconds", config.auto_destruct_seconds)
+            config.auto_destruct_after_click = data.get("auto_destruct_after_click", config.auto_destruct_after_click)
             config.promo_values = data.get("promo_values", config.promo_values)
             config.updated_at = datetime.now()
         else:
@@ -1652,7 +1677,9 @@ def save_auto_remarketing_config(
                 media_url=data.get("media_url"),
                 media_type=data.get("media_type"),
                 delay_minutes=delay_minutes,
-                auto_destruct_seconds=data.get("auto_destruct_seconds", 0),
+                auto_destruct_enabled=data.get("auto_destruct_enabled", False),
+                auto_destruct_seconds=data.get("auto_destruct_seconds", 3),
+                auto_destruct_after_click=data.get("auto_destruct_after_click", True),
                 promo_values=data.get("promo_values", {})
             )
             db.add(config)
@@ -1670,7 +1697,9 @@ def save_auto_remarketing_config(
             "media_url": config.media_url,
             "media_type": config.media_type,
             "delay_minutes": config.delay_minutes,
+            "auto_destruct_enabled": config.auto_destruct_enabled,
             "auto_destruct_seconds": config.auto_destruct_seconds,
+            "auto_destruct_after_click": config.auto_destruct_after_click,
             "promo_values": config.promo_values,
             "updated_at": config.updated_at.isoformat()
         }
@@ -6048,6 +6077,146 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         
                 except Exception as e:
                     logger.error(f"❌ Erro no handler checkout_promo_: {str(e)}", exc_info=True)
+                    bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
+
+            # --- B1.5) HANDLER DE BOTÃO DE REMARKETING AUTOMÁTICO ---
+            elif data.startswith("remarketing_plano_"):
+                try:
+                    plano_id = int(data.split("_")[2])
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+                    
+                    if not plano:
+                        bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
+                        return {"status": "error"}
+                    
+                    # Busca config de remarketing para pegar o valor promocional e timing de auto-destruição
+                    remarketing_cfg = db.query(RemarketingConfig).filter(
+                        RemarketingConfig.bot_id == bot_db.id
+                    ).first()
+                    
+                    promo_values = remarketing_cfg.promo_values or {} if remarketing_cfg else {}
+                    valor_final = promo_values.get(str(plano_id), plano.preco_atual)
+                    
+                    # ✅ EXECUTA AUTO-DESTRUIÇÃO SE CONFIGURADO
+                    if (remarketing_cfg and 
+                        remarketing_cfg.auto_destruct_enabled and 
+                        remarketing_cfg.auto_destruct_after_click and
+                        hasattr(enviar_remarketing_automatico, 'pending_destructions') and
+                        chat_id in enviar_remarketing_automatico.pending_destructions):
+                        
+                        destruction_data = enviar_remarketing_automatico.pending_destructions[chat_id]
+                        message_id = destruction_data['message_id']
+                        buttons_message_id = destruction_data['buttons_message_id']
+                        bot_instance = destruction_data['bot_instance']
+                        destruct_seconds = destruction_data['destruct_seconds']
+                        
+                        # Agenda a destruição
+                        def auto_delete_after_click():
+                            time.sleep(destruct_seconds)
+                            try:
+                                bot_instance.delete_message(chat_id, message_id)
+                                if buttons_message_id:
+                                    bot_instance.delete_message(chat_id, buttons_message_id)
+                                logger.debug(f"🗑️ Mensagem de remarketing auto-destruída APÓS clique")
+                            except:
+                                pass
+                        
+                        threading.Thread(target=auto_delete_after_click, daemon=True).start()
+                        
+                        # Remove do dict
+                        del enviar_remarketing_automatico.pending_destructions[chat_id]
+                        logger.info(f"💣 Auto-destruição ativada APÓS clique para {chat_id}")
+                    
+                    # Gera PIX com valor promocional
+                    lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                    track_id_pedido = lead_origem.tracking_id if lead_origem else None
+                    
+                    desconto_percentual = 0
+                    if plano.preco_atual > valor_final:
+                        desconto_percentual = int(((plano.preco_atual - valor_final) / plano.preco_atual) * 100)
+                    
+                    msg_wait = bot_temp.send_message(
+                        chat_id, 
+                        f"⏳ Gerando <b>OFERTA ESPECIAL</b>{f' com {desconto_percentual}% OFF' if desconto_percentual > 0 else ''}...", 
+                        parse_mode="HTML"
+                    )
+                    
+                    mytx = str(uuid.uuid4())
+                    
+                    # 🔥 NÃO REINICIA O CICLO DE REMARKETING
+                    pix = await gerar_pix_pushinpay(
+                        valor_float=valor_final,
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),
+                        user_first_name=first_name,
+                        plano_nome=f"{plano.nome_exibicao} (OFERTA AUTOMÁTICA)",
+                        agendar_remarketing=False  # <--- BLOQUEIA O RESTART DO CICLO
+                    )
+                    
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
+                        # Salva pedido
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"{plano.nome_exibicao} (PROMO {desconto_percentual}% OFF)" if desconto_percentual > 0 else plano.nome_exibicao,
+                            plano_id=plano.id,
+                            valor=valor_final,
+                            transaction_id=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=datetime.utcnow(),
+                            tracking_id=track_id_pedido
+                        )
+                        db.add(novo_pedido)
+                        db.commit()
+                        
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
+                        
+                        msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        
+                        if desconto_percentual > 0:
+                            msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            msg_pix += f"✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n"
+                            msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                        else:
+                            msg_pix += f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n\n"
+                        
+                        msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                        msg_pix += "👆 Toque na chave PIX para copiar\n"
+                        msg_pix += "⚡ Acesso liberado automaticamente!"
+                        
+                        # Inicia mensagens alternantes NOVAMENTE após clicar
+                        alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
+                        
+                        # Agenda remarketing novamente (se configurado)
+                        agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
+                        
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
+                    else:
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Erro no handler remarketing_plano_: {str(e)}", exc_info=True)
                     bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
 
             # --- B2) CHECKOUT NORMAL (AGORA VEM DEPOIS) ---

@@ -555,7 +555,11 @@ class RemarketingConfig(Base):
     
     # Timing
     delay_minutes = Column(Integer, default=5)
-    auto_destruct_seconds = Column(Integer, default=0)  # 0 = não destrói
+    
+    # ✅ NOVO: Auto-destruição OPCIONAL
+    auto_destruct_enabled = Column(Boolean, default=False)  # Se ativado, destrói a mensagem
+    auto_destruct_seconds = Column(Integer, default=3)  # Só é usado se enabled=True
+    auto_destruct_after_click = Column(Boolean, default=True)  # Se True, só destrói APÓS clicar no botão
     
     # Valores Promocionais (JSON)
     promo_values = Column(JSON, default={})  # {plano_id: valor_promo}
