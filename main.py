@@ -5944,6 +5944,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             # 🔥 CORREÇÃO: CHECKOUT PROMO VEM ANTES DO CHECKOUT NORMAL!
             # --- B1) CHECKOUT PROMOCIONAL (REMARKETING) ---
             elif data.startswith("checkout_promo_"):
+                # 🔥 FIX CRÍTICO: Cancela o timer de auto-destruição da mensagem anterior
+                try: cancelar_remarketing(int(chat_id))
+                except: pass
+
                 try:
                     parts = data.split("_")
                     # Formato: checkout_promo_{plano_id}_{preco_centavos}
