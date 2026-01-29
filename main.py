@@ -6120,9 +6120,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             pass
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
                     
-            except Exception as e:
-                logger.error(f"❌ Erro no handler checkout_promo_: {str(e)}", exc_info=True)
-                bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"❌ Erro no handler checkout_promo_: {str(e)}", exc_info=True)
+                    bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
 
             # --- C) BUMP YES/NO ---
             elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
