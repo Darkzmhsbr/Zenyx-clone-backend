@@ -344,10 +344,9 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             db.close()
         
         # ✅ NOVA LÓGICA: Auto-destruição OPCIONAL e APÓS CLIQUE
-        if config.auto_destruct_enabled and message_id:
+        if config.auto_destruct_enabled and config.auto_destruct_seconds > 0 and message_id:
             if config.auto_destruct_after_click:
                 # Salva o message_id para destruir DEPOIS do clique
-                # Vamos armazenar em um dict global temporário
                 if not hasattr(enviar_remarketing_automatico, 'pending_destructions'):
                     enviar_remarketing_automatico.pending_destructions = {}
                 
@@ -359,18 +358,19 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 }
                 logger.info(f"💣 Auto-destruição agendada APÓS clique para {chat_id}")
             else:
-                # Auto-destrói imediatamente (comportamento antigo)
+                # Auto-destrói imediatamente (após X segundos do envio)
                 def auto_delete():
                     time.sleep(config.auto_destruct_seconds)
                     try:
                         bot_instance.delete_message(chat_id, message_id)
                         if buttons_message_id:
                             bot_instance.delete_message(chat_id, buttons_message_id)
-                        logger.debug(f"🗑️ Mensagem de remarketing auto-destruída")
-                    except:
-                        pass
+                        logger.info(f"🗑️ Mensagem de remarketing auto-destruída (modo imediato)")
+                    except Exception as e:
+                        logger.error(f"❌ Erro ao auto-destruir mensagem: {e}")
                 
                 threading.Thread(target=auto_delete, daemon=True).start()
+                logger.info(f"💣 Auto-destruição IMEDIATA agendada para {config.auto_destruct_seconds}s")
         
         logger.info(f"✅ [REMARKETING] Enviado com sucesso para {chat_id} (bot {bot_id})")
         
