@@ -6056,7 +6056,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     # Gera PIX com PREÇO PROMOCIONAL
                     pix = await gerar_pix_pushinpay(
-                        valor_float=preco_promo,  # ✅ USA PREÇO PROMOCIONAL
+                        valor_float=preco_promo,
                         transaction_id=mytx,
                         bot_id=bot_db.id,
                         db=db,
@@ -6077,7 +6077,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             username=username,
                             plano_nome=f"{plano.nome_exibicao} (PROMO {desconto_percentual}% OFF)",
                             plano_id=plano.id,
-                            valor=preco_promo,  # ✅ VALOR PROMOCIONAL
+                            valor=preco_promo,
                             transaction_id=txid,
                             qr_code=qr,
                             status="pending",
@@ -6119,7 +6119,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         except:
                             pass
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
-                    
+                        
                 except Exception as e:
                     logger.error(f"❌ Erro no handler checkout_promo_: {str(e)}", exc_info=True)
                     bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
