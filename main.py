@@ -846,7 +846,7 @@ async def send_remarketing_job(
             ja_enviou = db.query(RemarketingLog).filter(
                 RemarketingLog.bot_id == bot_id,
                 RemarketingLog.user_id == str(chat_id), 
-                func.date(RemarketingLog.sent_at) == hoje
+                func.date(RemarketingLog.sent_at) == #hoje
             ).first()
 
             if ja_enviou:
@@ -875,14 +875,18 @@ async def send_remarketing_job(
             finally:
                 db_session.close()
 
-            # 4. Prepara os Botões
+            # 4. Prepara os Botões com PREÇO EMBUTIDO
             markup = types.InlineKeyboardMarkup()
             promos = config_dict.get('promo_values', {})
             for pid, pdata in promos.items():
                 if isinstance(pdata, dict) and pdata.get('price'):
                     btn_txt = pdata.get('button_text', 'Ver Oferta 🔥')
-                    # ✅ CORRETO: Usar checkout_ em vez de promo_
-                    markup.add(types.InlineKeyboardButton(btn_txt, callback_data=f"checkout_{pid}"))
+                    # ✅ Envia plano_id E preço em centavos
+                    preco_centavos = int(pdata['price'] * 100)
+                    markup.add(types.InlineKeyboardButton(
+                        btn_txt, 
+                        callback_data=f"checkout_promo_{pid}_{preco_centavos}"
+                    ))
 
             # 5. Envia a Mensagem
             bot = TeleBot(bot_token, threaded=False)
@@ -6021,6 +6025,104 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         
                     else:
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+
+            # --- B2) CHECKOUT PROMOCIONAL (REMARKETING) ---
+            elif data.startswith("checkout_promo_"):
+                try:
+                    parts = data.split("_")
+                    plano_id = int(parts[2])
+                    preco_centavos = int(parts[3])
+                    preco_promo = preco_centavos / 100.0
+                    
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+                    if not plano:
+                        bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
+                        return {"status": "error"}
+                    
+                    lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                    track_id_pedido = lead_origem.tracking_id if lead_origem else None
+                    
+                    # Calcula desconto
+                    desconto_percentual = 0
+                    if plano.preco_atual > preco_promo:
+                        desconto_percentual = int(((plano.preco_atual - preco_promo) / plano.preco_atual) * 100)
+                    
+                    msg_wait = bot_temp.send_message(
+                        chat_id, 
+                        f"⏳ Gerando <b>OFERTA ESPECIAL</b>{f' com {desconto_percentual}% OFF' if desconto_percentual > 0 else ''}...", 
+                        parse_mode="HTML"
+                    )
+                    mytx = str(uuid.uuid4())
+                    
+                    # Gera PIX com PREÇO PROMOCIONAL
+                    pix = await gerar_pix_pushinpay(
+                        valor_float=preco_promo,  # ✅ USA PREÇO PROMOCIONAL
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),
+                        user_first_name=first_name,
+                        plano_nome=f"{plano.nome_exibicao} (OFERTA)"
+                    )
+                    
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
+                        # Salva pedido
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"{plano.nome_exibicao} (PROMO {desconto_percentual}% OFF)",
+                            plano_id=plano.id,
+                            valor=preco_promo,  # ✅ VALOR PROMOCIONAL
+                            transaction_id=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=datetime.utcnow(),
+                            tracking_id=track_id_pedido
+                        )
+                        db.add(novo_pedido)
+                        db.commit()
+                        
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
+                        
+                        # Mensagem com desconto destacado
+                        msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        
+                        if desconto_percentual > 0:
+                            msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            msg_pix += f"✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n"
+                            msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                        else:
+                            msg_pix += f"💰 Valor: <b>R$ {preco_promo:.2f}</b>\n\n"
+                        
+                        msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                        msg_pix += "👆 Toque na chave PIX para copiar\n"
+                        msg_pix += "⚡ Acesso liberado automaticamente!"
+                        
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
+                    else:
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+                    
+            except Exception as e:
+                logger.error(f"❌ Erro no handler checkout_promo_: {str(e)}", exc_info=True)
+                bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
 
             # --- C) BUMP YES/NO ---
             elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
