@@ -2906,9 +2906,6 @@ def get_plataforma_pushin_id(db: Session) -> str:
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA COM REMARKETING)
 # =========================================================
-# =========================================================
-# 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA COM FLAG DE AGENDAMENTO)
-# =========================================================
 async def gerar_pix_pushinpay(
     valor_float: float, 
     transaction_id: str, 
@@ -2917,10 +2914,22 @@ async def gerar_pix_pushinpay(
     user_telegram_id: str = None,      
     user_first_name: str = None,       
     plano_nome: str = None,
-    agendar_remarketing: bool = True  # 🔥 NOVO PARÂMETRO: Controla se deve iniciar o ciclo
-):
+    agendar_remarketing: bool = True  # 🔥 ESSA LINHA É CRUCIAL PARA CORRIGIR O ERRO
+)
     """
-    Gera PIX com Split automático e controle de agendamento de remarketing.
+    Gera PIX com Split automático de taxa para a plataforma + Remarketing integrado.
+    
+    Args:
+        valor_float: Valor do PIX em reais (ex: 100.50)
+        transaction_id: ID único da transação
+        bot_id: ID do bot que está gerando o PIX
+        db: Sessão do banco de dados
+        user_telegram_id: ID do usuário no Telegram (para remarketing)
+        user_first_name: Nome do usuário (para remarketing)
+        plano_nome: Nome do plano escolhido (para remarketing)
+    
+    Returns:
+        dict: Resposta da API Pushin Pay ou None em caso de erro
     """
     token = get_pushin_token()
     
@@ -2936,21 +2945,15 @@ async def gerar_pix_pushinpay(
     }
     
     # URL do Webhook
-    # Ajuste para pegar do env ou hardcoded conforme sua preferência
-    raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
-    clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
-    webhook_url_final = f"https://{clean_domain}/webhook/pix"
+    seus_dominio = "zenyx-gbs-testesv1-production.up.railway.app" 
     
     # Valor em centavos
     valor_centavos = int(valor_float * 100)
     
-    # Tratamento de ID
-    user_clean = str(user_first_name or "anonimo").strip()
-    
     # Monta payload básico
     payload = {
         "value": valor_centavos, 
-        "webhook_url": webhook_url_final,
+        "webhook_url": f"https://{seus_dominio}/webhook/pix",
         "external_reference": transaction_id
     }
     
@@ -2958,54 +2961,69 @@ async def gerar_pix_pushinpay(
     # 💰 LÓGICA DE SPLIT (TAXA DA PLATAFORMA)
     # ========================================
     try:
-        # Busca ID da plataforma
-        plataforma_id = get_plataforma_pushin_id(db)
-        
-        # Busca Bot e Dono para saber a taxa
+        # 1. Busca o bot
         bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
-        membro_dono = None
-        if bot and bot.owner_id:
-            from database import User
-            membro_dono = db.query(User).filter(User.id == bot.owner_id).first()
         
-        if plataforma_id and membro_dono:
-            taxa_centavos = membro_dono.taxa_venda or 60
+        if bot and bot.owner_id:
+            # 2. Busca o dono do bot (membro)
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
             
-            # Validação: Taxa < 50% do valor
-            if taxa_centavos < (valor_centavos * 0.5):
-                payload["split_rules"] = [
-                    {
-                        "value": taxa_centavos,
-                        "account_id": plataforma_id,
-                        "charge_processing_fee": False
-                    }
-                ]
-                logger.info(f"💸 Split: Taxa R$ {taxa_centavos/100:.2f} -> Conta Plataforma")
-            else:
-                logger.warning("⚠️ Taxa muito alta em relação ao valor. Split cancelado.")
+            if owner:
+                # 3. Busca o pushin_pay_id da PLATAFORMA (para receber a taxa)
+                plataforma_id = get_plataforma_pushin_id(db)
                 
+                if plataforma_id:
+                    # 4. Define a taxa (padrão: R$ 0,60)
+                    taxa_centavos = owner.taxa_venda or 60
+                    
+                    # 5. Validação: Taxa não pode ser maior que o valor total
+                    if taxa_centavos >= valor_centavos:
+                        logger.warning(f"⚠️ Taxa ({taxa_centavos}) >= Valor Total ({valor_centavos}). Split ignorado.")
+                    else:
+                        # 6. Monta o split_rules
+                        payload["split_rules"] = [
+                            {
+                                "value": taxa_centavos,
+                                "account_id": plataforma_id
+                            }
+                        ]
+                        
+                        logger.info(f"💸 Split configurado: Taxa R$ {taxa_centavos/100:.2f} → Conta {plataforma_id[:8]}...")
+                        logger.info(f"   Membro receberá: R$ {(valor_centavos - taxa_centavos)/100:.2f}")
+                else:
+                    logger.warning("⚠️ Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
+            else:
+                logger.warning(f"⚠️ Owner do bot {bot_id} não encontrado. Gerando PIX SEM split.")
+        else:
+            logger.warning(f"⚠️ Bot {bot_id} sem owner_id. Gerando PIX SEM split.")
+            
     except Exception as e:
-        logger.error(f"❌ Erro split: {e}")
+        logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
+        # Continua sem split em caso de erro
     
     # ========================================
-    # 📤 ENVIA REQUISIÇÃO (HTTPX)
+    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY (HTTPX ASYNC)
     # ========================================
     try:
+        logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
+        
+        # ✅ MIGRAÇÃO: requests → httpx
         response = await http_client.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code in [200, 201]:
             pix_response = response.json()
+            logger.info(f"✅ PIX gerado com sucesso! ID: {pix_response.get('id')}")
             
             # ============================================================
-            # 🎯 AGENDAMENTO CONDICIONAL (AQUI ESTÁ A MÁGICA)
+            # 🎯 AGENDAMENTO CONDICIONAL
             # ============================================================
-            # Só agenda se agendar_remarketing for True E tivermos os dados do usuário
             if agendar_remarketing and user_telegram_id:
                 try:
                     chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
                     
                     if chat_id_int:
-                        # Cancela agendamentos anteriores para garantir limpeza
+                        # Cancela agendamentos anteriores
                         cancelar_remarketing(chat_id_int)
                         
                         # Agenda novo ciclo
@@ -3033,8 +3051,15 @@ async def gerar_pix_pushinpay(
             logger.error(f"❌ Erro PushinPay: {response.text}")
             return None
             
+    # 🔥 TRATAMENTO DE ERROS RESTAURADO 🔥
+    except httpx.TimeoutException:
+        logger.error("❌ Timeout ao conectar com PushinPay (10s)")
+        return None
+    except httpx.HTTPError as e:
+        logger.error(f"❌ Erro HTTP ao chamar PushinPay: {e}")
+        return None
     except Exception as e:
-        logger.error(f"❌ Exceção PIX: {e}")
+        logger.error(f"❌ Exceção ao gerar PIX: {e}")
         return None
 
 # --- HELPER: Notificar Admin Principal ---
