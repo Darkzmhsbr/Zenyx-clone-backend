@@ -2915,7 +2915,7 @@ async def gerar_pix_pushinpay(
     user_first_name: str = None,       
     plano_nome: str = None,
     agendar_remarketing: bool = True  # 🔥 ESSA LINHA É CRUCIAL PARA CORRIGIR O ERRO
-)
+):
     """
     Gera PIX com Split automático de taxa para a plataforma + Remarketing integrado.
     
