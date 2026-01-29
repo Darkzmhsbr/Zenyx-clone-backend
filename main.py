@@ -6498,64 +6498,101 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 else:
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-            # --- D) PROMO ---
+            # --- D) PROMO (Campanhas Manuais / Antigas) ---
+            # Lógica restaurada e adaptada para o novo sistema de PIX Async
             elif data.startswith("promo_"):
-                try: campanha_uuid = data.split("_")[1]
-                except: campanha_uuid = ""
+                try: 
+                    campanha_uuid = data.split("_")[1]
+                except: 
+                    campanha_uuid = ""
                 
+                # Busca usando a lógica antiga (UUID) que é a correta para essa rota
                 campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
                 
+                # Verifica validade (Lógica antiga restaurada: sem .is_active())
                 if not campanha:
                     bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou expirada.")
                 elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
                     bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
                 else:
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
+                    
                     if plano:
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
+                        
+                        # Calcula desconto visual para ficar bonito
+                        desconto_percentual = 0
+                        if plano.preco_atual > preco_final:
+                            desconto_percentual = int(((plano.preco_atual - preco_final) / plano.preco_atual) * 100)
+
                         msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                         mytx = str(uuid.uuid4())
-                        pix = gerar_pix_pushinpay(preco_final, mytx)
+                        
+                        # 🔥 ADAPTAÇÃO CRUCIAL: Usando o novo formato do gerador de PIX (Async + Novos Parâmetros)
+                        pix = await gerar_pix_pushinpay(
+                            valor_float=preco_final,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
+                            plano_nome=f"{plano.nome_exibicao} (OFERTA)",
+                            agendar_remarketing=False # Não ativa o remarketing automático em cima de campanha manual
+                        )
                         
                         if pix:
                             qr = pix.get('qr_code_text') or pix.get('qr_code')
                             txid = str(pix.get('id') or mytx).lower()
                             
+                            # Salva o pedido
                             novo_pedido = Pedido(
-                                bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                                plano_nome=f"{plano.nome_exibicao} (OFERTA)", plano_id=plano.id, valor=preco_final,
-                                transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
+                                bot_id=bot_db.id, 
+                                telegram_id=str(chat_id), 
+                                first_name=first_name, 
+                                username=username,
+                                plano_nome=f"{plano.nome_exibicao} (OFERTA)", 
+                                plano_id=plano.id, 
+                                valor=preco_final,
+                                transaction_id=txid, 
+                                qr_code=qr, 
+                                status="pending", 
+                                tem_order_bump=False, 
+                                created_at=datetime.utcnow(),
                                 tracking_id=None 
                             )
                             db.add(novo_pedido)
+                            
+                            # Atualiza contador de cliques da campanha
+                            if not campanha.clicks: campanha.clicks = 0
+                            campanha.clicks += 1
+                            
                             db.commit()
                             
                             try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                             except: pass
                             
                             markup_pix = types.InlineKeyboardMarkup()
-                            markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
+                            markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
-                            msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
+                            msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            
+                            if desconto_percentual > 0:
+                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                                msg_pix += f"✨ Por: <b>R$ {preco_final:.2f}</b>\n"
+                                msg_pix += f"📉 Economia: <b>{desconto_percentual}% OFF</b>\n"
+                            else:
+                                msg_pix += f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n"
+                                
+                            msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
 
                             bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         else:
+                            try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                            except: pass
                             bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
                     else:
                         bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
-
-            # --- E) VERIFICAR STATUS ---
-            elif data.startswith("check_payment_"):
-                tx_id = data.split("_")[2]
-                pedido = db.query(Pedido).filter(Pedido.transaction_id == tx_id).first()
-                
-                if not pedido:
-                    bot_temp.answer_callback_query(update.callback_query.id, "❌ Pedido não encontrado.", show_alert=True)
-                elif pedido.status in ['paid', 'approved', 'active']:
-                    bot_temp.answer_callback_query(update.callback_query.id, "✅ Pagamento Aprovado!", show_alert=False)
-                    bot_temp.send_message(chat_id, "✅ <b>O pagamento foi confirmado!</b>\nVerifique se você recebeu o link de acesso nas mensagens anteriores.", parse_mode="HTML")
-                else:
-                    bot_temp.answer_callback_query(update.callback_query.id, "⏳ Pagamento não identificado ainda. Tente novamente.", show_alert=True)
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
