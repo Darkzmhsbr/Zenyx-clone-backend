@@ -213,44 +213,46 @@ def cancelar_alternacao_mensagens(chat_id):
             logger.error(f"Erro ao cancelar alternação: {e}")
 
 # ============================================================
-# FUNÇÃO 3: DISPARO AUTOMÁTICO
+# FUNÇÃO 3: DISPARO AUTOMÁTICO (THREADED)
 # ============================================================
 def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
     """
     Envia o disparo automático de remarketing após o tempo configurado.
     Inclui mídia, texto e botões com valores promocionais.
+    CORRIGIDO: Agora usa 'user_id' no log para evitar erro de coluna inexistente.
     """
     try:
-        # Remove do set de timers ativos
+        # Remove do set de timers ativos para evitar vazamento de memória
         if chat_id in remarketing_timers:
             remarketing_timers.pop(chat_id, None)
         
-        # Verifica se já enviou
+        # Verifica se já enviou nesta sessão
         if chat_id in usuarios_com_remarketing_enviado:
-            logger.info(f"Remarketing já enviado para {chat_id}")
+            logger.info(f"⏭️ Remarketing já enviado para {chat_id}")
             return
         
         db = SessionLocal()
         
-        # Busca config de remarketing
-        config = db.query(RemarketingConfig).filter(
-            RemarketingConfig.bot_id == bot_id,
-            RemarketingConfig.is_active == True
-        ).first()
+        try:
+            # Busca config de remarketing
+            config = db.query(RemarketingConfig).filter(
+                RemarketingConfig.bot_id == bot_id,
+                RemarketingConfig.is_active == True
+            ).first()
+            
+            if not config:
+                logger.warning(f"⚠️ Config de remarketing não encontrada para bot {bot_id}")
+                return
+            
+            # Busca planos para montar botões
+            planos = db.query(PlanoConfig).filter(
+                PlanoConfig.bot_id == bot_id
+            ).all()
+            
+        finally:
+            db.close() # Fecha conexão rápida de leitura
         
-        if not config:
-            logger.warning(f"Config de remarketing não encontrada para bot {bot_id}")
-            db.close()
-            return
-        
-        # Busca planos para montar botões
-        planos = db.query(PlanoConfig).filter(
-            PlanoConfig.bot_id == bot_id
-        ).all()
-        
-        db.close()
-        
-        # Para mensagens alternantes
+        # Para mensagens alternantes (se estiverem rodando)
         cancelar_alternacao_mensagens(chat_id)
         
         # Prepara mensagem
@@ -282,10 +284,13 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             message_id = msg.message_id
             
         except ApiTelegramException as e:
-            if "bot was blocked" in str(e):
-                logger.warning(f"Usuário {chat_id} bloqueou o bot")
+            if "bot was blocked" in str(e) or "user is deactivated" in str(e):
+                logger.warning(f"⚠️ Usuário {chat_id} bloqueou o bot")
                 return
-            logger.error(f"Erro ao enviar mídia de remarketing: {e}")
+            logger.error(f"❌ Erro ao enviar mídia de remarketing: {e}")
+            return
+        except Exception as e:
+            logger.error(f"❌ Erro genérico no envio: {e}")
             return
         
         # Monta botões com valores promocionais
@@ -304,29 +309,36 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             )
             markup.add(botao)
         
-        # Envia botões
-        bot_instance.send_message(
-            chat_id,
-            "👇 Escolha seu plano:",
-            reply_markup=markup
-        )
+        # Envia botões (em mensagem separada para garantir visibilidade)
+        try:
+            bot_instance.send_message(
+                chat_id,
+                "👇 Escolha seu plano com desconto:",
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Erro ao enviar botões: {e}")
         
         # Marca como enviado
         usuarios_com_remarketing_enviado.add(chat_id)
         
-        # Registra no log
+        # Registra no log (CORREÇÃO DE COLUNA AQUI)
         db = SessionLocal()
-        log = RemarketingLog(
-            bot_id=bot_id,
-            user_telegram_id=chat_id,
-            sent_at=datetime.utcnow(),
-            message_text=mensagem,
-            promo_values=promo_values,
-            status='sent'
-        )
-        db.add(log)
-        db.commit()
-        db.close()
+        try:
+            log = RemarketingLog(
+                bot_id=bot_id,
+                user_id=str(chat_id), # ✅ CORRIGIDO: Era user_telegram_id, agora é user_id
+                sent_at=datetime.utcnow(),
+                message_text=mensagem,
+                promo_values=promo_values,
+                status='sent'
+            )
+            db.add(log)
+            db.commit()
+        except Exception as e_log:
+            logger.error(f"❌ Erro ao salvar log de remarketing: {e_log}")
+        finally:
+            db.close()
         
         # Auto-destruir se configurado
         if config.auto_destruct_seconds > 0 and message_id:
@@ -334,15 +346,16 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 time.sleep(config.auto_destruct_seconds)
                 try:
                     bot_instance.delete_message(chat_id, message_id)
+                    logger.debug(f"🗑️ Mensagem de remarketing auto-destruída")
                 except:
                     pass
             
             threading.Thread(target=auto_delete, daemon=True).start()
         
-        logger.info(f"✅ Remarketing automático enviado para {chat_id} (bot {bot_id})")
+        logger.info(f"✅ [REMARKETING] Enviado com sucesso para {chat_id} (bot {bot_id})")
         
     except Exception as e:
-        logger.error(f"Erro ao enviar remarketing automático: {e}")
+        logger.error(f"❌ Erro fatal no job de remarketing automático: {e}")
 
 # ============================================================
 # FUNÇÃO 4: AGENDAR REMARKETING
