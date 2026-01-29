@@ -6021,11 +6021,50 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
 
             # 🔥 CORREÇÃO: CHECKOUT PROMO VEM ANTES DO CHECKOUT NORMAL!
-            # --- B1) CHECKOUT PROMOCIONAL (REMARKETING) ---
+            # --- B1) CHECKOUT PROMOCIONAL (REMARKETING & DISPAROS) ---
             elif data.startswith("checkout_promo_"):
-                # 🔥 FIX CRÍTICO: Cancela o timer de auto-destruição da mensagem anterior
+                # 🔥 FIX CRÍTICO: Cancela timers antigos de remarketing
                 try: cancelar_remarketing(int(chat_id))
                 except: pass
+
+                # ==============================================================================
+                # 💣 CORREÇÃO MESTRE: AUTO-DESTRUIÇÃO AO CLICAR (Agora no handler correto!)
+                # ==============================================================================
+                try:
+                    # Verifica se existe o dicionário de destruições pendentes
+                    if hasattr(enviar_remarketing_automatico, 'pending_destructions'):
+                        dict_pendente = enviar_remarketing_automatico.pending_destructions
+                        
+                        # Procura o agendamento (Tenta chave INT e STR para garantir)
+                        dados_destruicao = dict_pendente.get(chat_id) or dict_pendente.get(str(chat_id))
+                        
+                        if dados_destruicao:
+                            logger.info(f"💣 [CHECKOUT] Encontrado agendamento de destruição para {chat_id}")
+                            
+                            msg_id_to_del = dados_destruicao.get('message_id')
+                            btns_id_to_del = dados_destruicao.get('buttons_message_id')
+                            # Tempo de segurança para o usuário ver que clicou (ex: 2s) ou o configurado
+                            tempo_para_explodir = dados_destruicao.get('destruct_seconds', 3)
+                            
+                            def auto_delete_task():
+                                time.sleep(tempo_para_explodir)
+                                try:
+                                    bot_temp.delete_message(chat_id, msg_id_to_del)
+                                    if btns_id_to_del:
+                                        bot_temp.delete_message(chat_id, btns_id_to_del)
+                                    logger.info(f"🗑️ Mensagem destruída APÓS clique no Checkout ({chat_id})")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Falha ao deletar msg (já deletada?): {e}")
+
+                            # Inicia a thread de destruição
+                            threading.Thread(target=auto_delete_task, daemon=True).start()
+                            
+                            # Limpa do dicionário para não tentar deletar de novo
+                            if chat_id in dict_pendente: del dict_pendente[chat_id]
+                            if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
+                except Exception as e_destruct:
+                    logger.error(f"⚠️ Erro não fatal na lógica de destruição: {e_destruct}")
+                # ==============================================================================
 
                 try:
                     parts = data.split("_")
@@ -6058,7 +6097,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     )
                     mytx = str(uuid.uuid4())
                     
-                    # 🔥 AQUI ESTÁ A CORREÇÃO 🔥
                     # Passamos agendar_remarketing=False para NÃO reiniciar o ciclo de mensagens
                     pix = await gerar_pix_pushinpay(
                         valor_float=preco_promo,
