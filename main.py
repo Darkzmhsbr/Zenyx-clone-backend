@@ -889,9 +889,10 @@ async def send_remarketing_job(
                     user_id=str(chat_id), # ✅ Agora bate com o database.py
                     message_sent=msg_text,       # ✅ CORRIGIDO 
                     status='sent', 
-                    sent_at=datetime.now()
+                    sent_at=datetime.now(),
                     promo_values=promos,         # ✅ ADICIONAR
-                    converted=False              # ✅ ADICIONAR
+                    converted=False,              # ✅ ADICIONAR
+                    error_message=None
                 )
                 db.add(novo_log)
                 db.commit()
