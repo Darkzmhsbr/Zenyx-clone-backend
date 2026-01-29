@@ -819,8 +819,7 @@ async def send_remarketing_job(
     bot_id: int
 ):
     """
-    Envia o remarketing automático.
-    CORRIGIDO: Agora alinhado com database.py (user_id como String)
+    VERSÃO DE TESTE: Trava de envio diário DESATIVADA.
     """
     try:
         delay = config_dict.get('delay_minutes', 5)
@@ -840,18 +839,23 @@ async def send_remarketing_job(
                 logger.info(f"💰 [REMARKETING] Cancelado: Usuário {chat_id} já pagou.")
                 return
 
-            # 2. Verifica se JÁ ENVIOU hoje
-            # Agora RemarketingLog.user_id existe no database.py! ✅
-            hoje = datetime.now().date()
-            ja_enviou = db.query(RemarketingLog).filter(
-                RemarketingLog.bot_id == bot_id,
-                RemarketingLog.user_id == str(chat_id), 
-                func.date(RemarketingLog.sent_at) == #hoje
-            ).first()
+            # ==============================================================================
+            # 🚨 MODO TESTE ATIVADO: A verificação de "Já enviou hoje" foi desativada abaixo
+            # para permitir múltiplos disparos. Quando for para produção, descomente este bloco.
+            # ==============================================================================
+            
+            # hoje = datetime.now().date()
+            # ja_enviou = db.query(RemarketingLog).filter(
+            #     RemarketingLog.bot_id == bot_id,
+            #     RemarketingLog.user_id == str(chat_id), 
+            #     func.date(RemarketingLog.sent_at) == hoje
+            # ).first()
 
-            if ja_enviou:
-                logger.info(f"⏭️ [REMARKETING] Já enviado hoje para {chat_id}")
-                return
+            # if ja_enviou:
+            #     logger.info(f"⏭️ [REMARKETING] Já enviado hoje para {chat_id}")
+            #     return
+            
+            # ==============================================================================
 
             # 3. Prepara a mensagem
             msg_text = config_dict.get('message_text', '')
@@ -903,15 +907,15 @@ async def send_remarketing_job(
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
-                # REGISTRO NO BANCO (Onde estava dando erro)
+                # REGISTRO NO BANCO
                 novo_log = RemarketingLog(
                     bot_id=bot_id, 
-                    user_id=str(chat_id), # ✅ Agora bate com o database.py
-                    message_sent=msg_text,       # ✅ CORRIGIDO 
+                    user_id=str(chat_id),
+                    message_sent=msg_text,
                     status='sent', 
                     sent_at=datetime.now(),
-                    promo_values=promos,         # ✅ ADICIONAR
-                    converted=False,              # ✅ ADICIONAR
+                    promo_values=promos,
+                    converted=False,
                     error_message=None
                 )
                 db.add(novo_log)
