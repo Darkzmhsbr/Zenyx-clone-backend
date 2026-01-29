@@ -344,36 +344,49 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             db.close()
         
         # ✅ NOVA LÓGICA: Auto-destruição OPCIONAL e APÓS CLIQUE
+        # Correção Mestre: Verifica se está HABILITADO no painel E se o tempo é maior que 0
         if config.auto_destruct_enabled and config.auto_destruct_seconds > 0 and message_id:
+            
             if config.auto_destruct_after_click:
-                # Salva o message_id para destruir DEPOIS do clique
+                # --- CENÁRIO 1: Destruir SÓ DEPOIS do clique (Salva para mais tarde) ---
+                
+                # Cria o dicionário temporário na função se ainda não existir
                 if not hasattr(enviar_remarketing_automatico, 'pending_destructions'):
                     enviar_remarketing_automatico.pending_destructions = {}
                 
+                # Armazena os dados necessários. A deleção real será feita no callback_query_handler (botão)
                 enviar_remarketing_automatico.pending_destructions[chat_id] = {
                     'message_id': message_id,
-                    'buttons_message_id': buttons_message_id,
+                    'buttons_message_id': buttons_message_id, # Salva ID dos botões se forem separados
                     'bot_instance': bot_instance,
                     'destruct_seconds': config.auto_destruct_seconds
                 }
-                logger.info(f"💣 Auto-destruição agendada APÓS clique para {chat_id}")
+                logger.info(f"💣 Auto-destruição agendada APÓS CLIQUE para {chat_id} (Aguardando interação)")
+            
             else:
-                # Auto-destrói imediatamente (após X segundos do envio)
+                # --- CENÁRIO 2: Destruir IMEDIATAMENTE (Contagem Regressiva) ---
+                # O usuário não precisa fazer nada, a mensagem some sozinha.
+                
                 def auto_delete():
+                    # Aguarda o tempo configurado (ex: 60 segundos)
                     time.sleep(config.auto_destruct_seconds)
                     try:
+                        # Tenta apagar a mensagem principal
                         bot_instance.delete_message(chat_id, message_id)
+                        # Se tiver mensagem de botões separada, apaga também
                         if buttons_message_id:
                             bot_instance.delete_message(chat_id, buttons_message_id)
-                        logger.info(f"🗑️ Mensagem de remarketing auto-destruída (modo imediato)")
+                        logger.info(f"🗑️ Mensagem de remarketing auto-destruída (Timer esgotado) para {chat_id}")
                     except Exception as e:
-                        logger.error(f"❌ Erro ao auto-destruir mensagem: {e}")
+                        # Erros comuns: mensagem já apagada ou bot sem admin. Não quebra o sistema.
+                        logger.warning(f"⚠️ Tentativa de auto-destruição falhou (pode já não existir): {e}")
                 
+                # Inicia a contagem em paralelo (Daemon thread) para não travar o envio de outros usuários
                 threading.Thread(target=auto_delete, daemon=True).start()
-                logger.info(f"💣 Auto-destruição IMEDIATA agendada para {config.auto_destruct_seconds}s")
-        
+                logger.info(f"⏳ Auto-destruição IMEDIATA agendada para {config.auto_destruct_seconds}s")
+
         logger.info(f"✅ [REMARKETING] Enviado com sucesso para {chat_id} (bot {bot_id})")
-        
+
     except Exception as e:
         logger.error(f"❌ Erro fatal no job de remarketing automático: {e}")
 
