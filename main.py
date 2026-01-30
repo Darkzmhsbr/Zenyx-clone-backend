@@ -639,18 +639,18 @@ async def processar_webhooks_pendentes():
 http_client = None
 
 # =========================================================
-# 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR
+# 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR (ASYNC)
 # =========================================================
 @app.on_event("startup")
 async def startup_event():
     """
     Executado quando o servidor FastAPI inicia.
-    Inicializa componentes críticos do sistema.
+    Inicializa componentes críticos do sistema (HTTP Client e Scheduler).
     """
     global http_client
     
     try:
-        # 1. INICIALIZAR HTTP CLIENT (httpx)
+        # 1. INICIALIZAR HTTP CLIENT (httpx) - CRÍTICO PARA PERFORMANCE V5
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
@@ -658,26 +658,30 @@ async def startup_event():
         )
         logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
         
-        # 2. VERIFICAR BANCO DE DADOS
+        # 2. VERIFICAR CONEXÃO COM BANCO DE DADOS
         db = SessionLocal()
-        db.execute(text("SELECT 1"))
-        db.close()
-        logger.info("✅ [STARTUP] Conexão com banco de dados validada")
+        try:
+            db.execute(text("SELECT 1"))
+            logger.info("✅ [STARTUP] Conexão com banco de dados validada")
+        except Exception as db_err:
+            logger.error(f"❌ [STARTUP] Falha ao conectar no banco: {db_err}")
+        finally:
+            db.close()
         
-        # 3. INICIAR SCHEDULER
-        scheduler.start()
-        logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
-        logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
-        logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
+        # 3. INICIAR SCHEDULER (JOBS AGENDADOS)
+        if not scheduler.running:
+            scheduler.start()
+            logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
+            logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
+            logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
         
         logger.info("=" * 60)
-        logger.info("🚀 ZENYX GBOT v5.0 - Sistema iniciado com sucesso!")
+        logger.info("🚀 ZENYX GBOT v5.0 - Servidor Async iniciado com sucesso!")
         logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro crítico na inicialização: {e}")
-        # Não falhar completamente - permitir que a API suba
-
+        logger.error(f"❌ [STARTUP] Erro crítico na inicialização Async: {e}")
+        # Não falhar completamente - permitir que a API suba mesmo com erros parciais
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -9314,11 +9318,17 @@ def on_startup():
     # 1. Cria tabelas básicas se não existirem
     try:
         print("📊 Inicializando banco de dados...")
+        
+        # 🔥 CORREÇÃO DO MESTRE: CRIA AS TABELAS PRIMEIRO!
+        # Isso garante que 'bots', 'users', etc. existam antes de qualquer alteração.
+        Base.metadata.create_all(bind=engine)
+        
+        # Chama o init_db padrão (caso tenha outras inicializações)
         init_db()
         
-        # 🔥 MESTRE CÓDIGO FÁCIL: CHAMADA DE CORREÇÃO FORÇADA AQUI
+        # 🔥 MESTRE CÓDIGO FÁCIL: CHAMADA DE CORREÇÃO FORÇADA
         print("🔧 Verificando integridade e colunas faltantes...")
-        forcar_atualizacao_tabelas() # <--- ESSA É A FUNÇÃO QUE CONTÉM A LISTA DE SQL ACIMA
+        forcar_atualizacao_tabelas() # <--- Agora vai funcionar porque as tabelas já existem!
         
         print("✅ Banco de dados inicializado e corrigido")
     except Exception as e:
