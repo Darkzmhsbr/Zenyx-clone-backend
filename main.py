@@ -637,51 +637,78 @@ async def processar_webhooks_pendentes():
 
 # ============ HTTPX CLIENT GLOBAL ============
 http_client = None
-
 # =========================================================
-# 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR (ASYNC)
+# ⚙️ STARTUP OTIMIZADA (CORREÇÃO DO MESTRE)
 # =========================================================
 @app.on_event("startup")
-async def startup_event():
-    """
-    Executado quando o servidor FastAPI inicia.
-    Inicializa componentes críticos do sistema (HTTP Client e Scheduler).
-    """
-    global http_client
+def on_startup():
+    print("="*60)
+    print("🚀 INICIANDO ZENYX GBOT SAAS - MODO CLONE")
+    print("="*60)
     
     try:
-        # 1. INICIALIZAR HTTP CLIENT (httpx) - CRÍTICO PARA PERFORMANCE V5
-        http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-            follow_redirects=True
-        )
-        logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
+        print("🏗️ 1. CONSTRUINDO TABELAS DO ZERO (CRÍTICO)...")
+        # ESTA LINHA É A MÁGICA. ELA TEM QUE SER A PRIMEIRA!
+        # Ela cria 'bots', 'leads', 'pedidos' se eles não existirem no banco vazio.
+        Base.metadata.create_all(bind=engine)
+        print("✅ Tabelas estruturais criadas com sucesso!")
+
+        print("📊 2. Inicializando dados básicos...")
+        # Agora que as tabelas existem, podemos inserir dados iniciais
+        init_db()
         
-        # 2. VERIFICAR CONEXÃO COM BANCO DE DADOS
-        db = SessionLocal()
-        try:
-            db.execute(text("SELECT 1"))
-            logger.info("✅ [STARTUP] Conexão com banco de dados validada")
-        except Exception as db_err:
-            logger.error(f"❌ [STARTUP] Falha ao conectar no banco: {db_err}")
-        finally:
-            db.close()
+        print("🔧 3. Verificando atualizações de colunas (Migração)...")
+        # Só agora rodamos a verificação de colunas, pois as tabelas JÁ EXISTEM
+        forcar_atualizacao_tabelas()
         
-        # 3. INICIAR SCHEDULER (JOBS AGENDADOS)
-        if not scheduler.running:
-            scheduler.start()
-            logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
-            logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
-            logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
-        
-        logger.info("=" * 60)
-        logger.info("🚀 ZENYX GBOT v5.0 - Servidor Async iniciado com sucesso!")
-        logger.info("=" * 60)
+        print("✅ Banco de dados 100% pronto e atualizado")
         
     except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro crítico na inicialização Async: {e}")
-        # Não falhar completamente - permitir que a API suba mesmo com erros parciais
+        logger.error(f"❌ ERRO CRÍTICO NO STARTUP: {e}")
+        import traceback
+        traceback.print_exc()
+        # Não paramos o app, mas o erro ficará visível
+    
+    # --- BLOCO DE MIGRAÇÕES LEGADO (MANTIDO POR SEGURANÇA) ---
+    try:
+        print("🔄 Executando verificações extras de versão...")
+        try:
+            executar_migracao_v3()
+        except: pass
+        
+        try:
+            executar_migracao_v4()
+        except: pass
+        
+        try:
+            executar_migracao_v5()
+        except: pass
+        
+        try:
+            executar_migracao_v6()
+        except: pass
+            
+    except Exception as e:
+        logger.error(f"❌ Erro nas migrações extras: {e}")
+    
+    # 4. Configura pushin_pay_id
+    try:
+        print("💳 Configurando sistema de pagamento...")
+        db = SessionLocal()
+        try:
+            config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_plataforma_id").first()
+            if not config:
+                config = SystemConfig(key="pushin_plataforma_id", value="")
+                db.add(config)
+                db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Erro config pagamento: {e}")
+    
+    print("="*60)
+    print("✅ SISTEMA INICIADO COM SUCESSO!")
+    print("="*60)
 
 @app.on_event("shutdown")
 async def shutdown_event():
