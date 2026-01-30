@@ -1474,7 +1474,7 @@ class TokenData(BaseModel):
 # =========================================================
 # 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
 # =========================================================
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0"
+# REMOVI A CHAVE FIXA DAQUI. VAMOS USAR APENAS VARIÁVEL DE AMBIENTE.
 
 async def verify_turnstile(token: str) -> bool:
     """
@@ -1484,8 +1484,15 @@ async def verify_turnstile(token: str) -> bool:
     if not token:
         return False
     
-    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0")
+    # AQUI ESTÁ A MUDANÇA: 
+    # O segundo parâmetro agora é vazio ou um aviso, pois a chave real virá do Railway.
+    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "") 
     
+    if not secret_key:
+        print("⚠️ AVISO: TURNSTILE_SECRET_KEY não configurada no ambiente!")
+        # Se não tiver chave, bloqueia por segurança ou retorna False
+        return False
+
     payload = {
         "secret": secret_key,
         "response": token
@@ -4117,7 +4124,7 @@ def criar_bot(
         # ==============================================================================
         try:
             # 1. Define a URL (Já com a correção do 'v1' forçada)
-            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testesv1-production.up.railway.app")
+            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-clone-backend-production.up.railway.app")
             
             # Tratamento de string para evitar erros de URL
             if public_url.startswith("https://"):
@@ -4274,7 +4281,7 @@ def update_bot(
             except: 
                 pass
 
-            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testesv1-production.up.railway.app")
+            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-clone-backend-production.up.railway.app")
             if public_url.startswith("https://"): 
                 public_url = public_url.replace("https://", "")
             
