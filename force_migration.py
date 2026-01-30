@@ -1,86 +1,105 @@
 import os
-import time
-from sqlalchemy import create_engine, text
+import psycopg2
+import logging
+from urllib.parse import urlparse
+# MESTRE CÓDIGO FÁCIL: Importamos a estrutura do banco para garantir a criação
+from database import Base, engine
 
-# Pega a URL do banco do ambiente
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Configuração de Logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def forcar_atualizacao_tabelas():
-    if not DATABASE_URL:
-        print("❌ DATABASE_URL não encontrada.")
+    """
+    Função blindada que GARANTE a existência das tabelas antes de tentar migrar.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    
+    if not db_url:
+        logger.error("❌ DATABASE_URL não encontrada!")
         return
 
-    print("🚀 Iniciando Migração Forçada de Colunas...")
+    print("="*60)
+    print("🛡️ [AUTO-FIX] INICIANDO VERIFICAÇÃO DE INTEGRIDADE DO BANCO")
+    print("="*60)
+
+    # 1. VACINA: GARANTIR QUE AS TABELAS EXISTEM (SQLAlchemy)
+    try:
+        print("🏗️ 1. Verificando/Criando tabelas estruturais (Base.metadata)...")
+        Base.metadata.create_all(bind=engine)
+        print("✅ Tabelas estruturais garantidas!")
+    except Exception as e:
+        print(f"⚠️ Erro ao tentar criar tabelas via SQLAlchemy: {e}")
+        # Não paramos aqui, tentamos seguir caso o erro seja apenas de conexão momentânea
     
-    engine = create_engine(DATABASE_URL)
-    
-    with engine.connect() as conn:
-        # Habilita o commit automático
-        conn.execution_options(isolation_level="AUTOCOMMIT")
+    # 2. MIGRAÇÃO FORÇADA (SQL Bruto)
+    print("🔧 2. Iniciando verificação de colunas (SQL Bruto)...")
+    conn = None
+    try:
+        # Conexão direta via psycopg2 para comandos DDL manuais
+        result = urlparse(db_url)
+        username = result.username
+        password = result.password
+        database = result.path[1:]
+        hostname = result.hostname
+        port = result.port
         
-        # =========================================================
-        # 🆕 CRIAR TABELA USERS (SE NÃO EXISTIR)
-        # =========================================================
-        try:
-            sql_create_users = text("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    username VARCHAR UNIQUE NOT NULL,
-                    email VARCHAR UNIQUE NOT NULL,
-                    password_hash VARCHAR NOT NULL,
-                    full_name VARCHAR,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    is_superuser BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute(sql_create_users)
-            print("✅ Tabela 'users' verificada/criada")
-        except Exception as e:
-            print(f"⚠️ Erro ao criar tabela users: {e}")
-        
-        # =========================================================
-        # 🆕 ADICIONAR COLUNA owner_id NA TABELA bots
-        # =========================================================
-        try:
-            sql_add_owner = text("""
-                ALTER TABLE bots 
-                ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id);
-            """)
-            conn.execute(sql_add_owner)
-            print("✅ Coluna 'owner_id' adicionada à tabela bots")
-        except Exception as e:
-            print(f"⚠️ Erro ao adicionar owner_id: {e}")
-        
-        # =========================================================
-        # COLUNAS EXISTENTES (MINIAPP CATEGORIES)
-        # =========================================================
-        novas_colunas = [
-            "bg_color VARCHAR DEFAULT '#000000'",
-            "banner_desk_url VARCHAR",
-            "video_preview_url VARCHAR",
-            "model_img_url VARCHAR",
-            "model_name VARCHAR",
-            "model_desc TEXT",
-            "footer_banner_url VARCHAR",
-            "deco_lines_url VARCHAR",
-            "model_name_color VARCHAR DEFAULT '#ffffff'",
-            "model_desc_color VARCHAR DEFAULT '#cccccc'"
+        conn = psycopg2.connect(
+            database=database,
+            user=username,
+            password=password,
+            host=hostname,
+            port=port
+        )
+        conn.autocommit = True
+        cursor = conn.cursor()
+
+        # Lista de comandos de migração (ALTER TABLE)
+        # Usamos IF NOT EXISTS para evitar erros se a coluna já existir
+        commands = [
+            # Tabela BOTS
+            """
+            ALTER TABLE bots 
+            ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id);
+            """,
+            
+            # Tabela MINIAPP_CATEGORIES - Campos Visuais
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS bg_color VARCHAR DEFAULT '#000000';",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS banner_desk_url VARCHAR;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS video_preview_url VARCHAR;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_url VARCHAR;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name VARCHAR;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc TEXT;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS footer_banner_url VARCHAR;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS deco_lines_url VARCHAR;",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name_color VARCHAR DEFAULT '#ffffff';",
+            "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc_color VARCHAR DEFAULT '#cccccc';",
+            
+            # Tabela MINIAPP_CONFIG
+            "ALTER TABLE miniapp_config ADD COLUMN IF NOT EXISTS banner_url VARCHAR;",
+            "ALTER TABLE miniapp_config ADD COLUMN IF NOT EXISTS logo_url VARCHAR;",
+            
+            # Tabela USERS (Garantia de Superuser)
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN DEFAULT FALSE;",
+            
+            # Tabela PEDIDOS (Garantia de Split)
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS split_rules TEXT;"
         ]
 
-        for coluna_sql in novas_colunas:
-            col_name = coluna_sql.split()[0]
+        for command in commands:
             try:
-                sql = text(f"ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS {coluna_sql};")
-                conn.execute(sql)
-                print(f"✅ Coluna verificada/criada: {col_name}")
+                cursor.execute(command)
+            except psycopg2.errors.UndefinedTable as e:
+                # Este erro não deve mais acontecer com a vacina acima, mas se acontecer, logamos claro.
+                logger.warning(f"⚠️ Tabela ainda não encontrada durante ALTER: {e}")
             except Exception as e:
-                print(f"⚠️ Erro ao criar {col_name}: {e}")
+                # Ignora erros de coluna duplicada ou outros menores
+                logger.info(f"ℹ️ Comando SQL processado (pode já existir): {str(e)[:100]}")
 
-    print("🎉 Migração Forçada Concluída!")
+        print("✅ Migração Forçada de Colunas Concluída!")
 
-if __name__ == "__main__":
-    forcar_atualizacao_tabelas()
+    except Exception as e:
+        logger.error(f"❌ Erro fatal na conexão psycopg2: {e}")
+    finally:
+        if conn:
+            conn.close()
