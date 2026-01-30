@@ -1474,7 +1474,7 @@ class TokenData(BaseModel):
 # =========================================================
 # 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
 # =========================================================
-# REMOVI A CHAVE FIXA DAQUI. VAMOS USAR APENAS VARIÁVEL DE AMBIENTE.
+TURNSTILE_SECRET_KEY = "0x4AAAAAACV1UU5BKfJ9uPHPbBc5bsF5BKo"
 
 async def verify_turnstile(token: str) -> bool:
     """
@@ -1484,15 +1484,8 @@ async def verify_turnstile(token: str) -> bool:
     if not token:
         return False
     
-    # AQUI ESTÁ A MUDANÇA: 
-    # O segundo parâmetro agora é vazio ou um aviso, pois a chave real virá do Railway.
-    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "") 
+    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "0x4AAAAAACV1UU5BKfJ9uPHPbBc5bsF5BKo")
     
-    if not secret_key:
-        print("⚠️ AVISO: TURNSTILE_SECRET_KEY não configurada no ambiente!")
-        # Se não tiver chave, bloqueia por segurança ou retorna False
-        return False
-
     payload = {
         "secret": secret_key,
         "response": token
