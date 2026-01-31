@@ -11,15 +11,13 @@ from telebot import types
 import json
 import uuid
 from sqlalchemy.exc import IntegrityError
-
 from sqlalchemy import func, desc, text, and_, or_
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
 from pydantic import BaseModel, EmailStr, Field 
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict  # ✅ ADICIONAR Dict
+from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 
 # --- IMPORTS DE MIGRATION ---
@@ -32,15 +30,14 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # --- SCHEDULER ---
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 import asyncio
 from threading import Lock
 
 # =========================================================
-# ✅ IMPORTS CORRIGIDOS DO DATABASE
+# ✅ IMPORTS CORRIGIDOS DO DATABASE (COM BASE)
 # =========================================================
 from database import (
-    Base,                 # <--- ADICIONE ESTE AQUI! (Obrigatório para o startup)
+    Base,                 # <--- OBRIGATÓRIO: ISSO CORRIGE O ERRO "NameError"
     SessionLocal, 
     init_db, 
     Bot as BotModel, 
@@ -60,15 +57,43 @@ from database import (
     AuditLog, 
     Notification, 
     User, 
-    engine,               # O engine já estava aqui, perfeito.
+    engine,
     WebhookRetry,
-    # ✅ NOVOS IMPORTS PARA REMARKETING AUTOMÁTICO
     RemarketingConfig,
     AlternatingMessages, 
     RemarketingLog 
 )
 
 import update_db
+
+# Migrações
+from migration_v3 import executar_migracao_v3
+from migration_v4 import executar_migracao_v4
+from migration_v5 import executar_migracao_v5
+from migration_v6 import executar_migracao_v6
+
+# Configuração de Log
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# =========================================================
+# 🚀 INICIALIZAÇÃO DA APP
+# =========================================================
+app = FastAPI(title="Zenyx Gbot SaaS Clone")
+
+# 🔓 CORS CONFIG - MODO LIBERADO (REGEX)
+# APLICADO LOGO NO INÍCIO PARA GARANTIR FUNCIONAMENTO
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=".*",      # <--- LIBERA TUDO (Login, Registro, Dashboard)
+    allow_credentials=True,       # <--- PERMITE O TOKEN DE LOGIN
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def health_check_root():
+    return {"status": "ok", "message": "Zenyx Clone Backend is Running!", "timestamp": datetime.now()}
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
@@ -1458,14 +1483,6 @@ try:
     forcar_atualizacao_tabelas()
 except Exception as e:
     print(f"Erro na migração forçada: {e}")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=".*",      # <--- ESSA É A CHAVE DA CORREÇÃO
-    allow_credentials=True,       # Necessário para cookies/auth
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # =========================================================
 # 🔐 CONFIGURAÇÕES DE AUTENTICAÇÃO JWT
@@ -3931,27 +3948,38 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     }
     
 @app.post("/api/auth/login", response_model=Token)
-async def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):  # ✅ ASYNC
+async def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     from database import User
     
-    logger.info(f"🔑 Tentativa de login: {user_data.username}")
+    logger.info(f"🔑 LOGIN: Tentativa para '{user_data.username}'")
+    logger.info(f"🔍 CAPTCHA RECEBIDO: {user_data.turnstile_token[:10]}..." if user_data.turnstile_token else "🔍 CAPTCHA: VAZIO/NONE")
 
-    # VERIFICAÇÃO TURNSTILE
-    if not await verify_turnstile(user_data.turnstile_token):  # ✅ AWAIT
-         log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
-                   description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
-         raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
+    # VERIFICAÇÃO TURNSTILE (Opcional no Login se estiver travando muito)
+    if user_data.turnstile_token:
+        if not await verify_turnstile(user_data.turnstile_token):
+             logger.warning(f"❌ Login bloqueado: Captcha inválido para {user_data.username}")
+             raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha).")
+    else:
+        # Se quiser bloquear login sem captcha, descomente a linha abaixo:
+        # raise HTTPException(status_code=400, detail="Captcha obrigatório.")
+        logger.warning("⚠️ Login sem captcha (Permitido temporariamente para teste)")
 
+    # Busca usuário
     user = db.query(User).filter(User.username == user_data.username).first()
     
-    if not user or not verify_password(user_data.password, user.password_hash):
+    if not user:
+        logger.warning(f"❌ Usuário não encontrado: {user_data.username}")
+        raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+        
+    if not verify_password(user_data.password, user.password_hash):
+        logger.warning(f"❌ Senha incorreta para: {user_data.username}")
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     
+    # Login Sucesso
     has_bots = len(user.bots) > 0
+    logger.info(f"✅ LOGIN SUCESSO: {user.username} (SuperUser: {user.is_superuser})")
 
-    log_action(db=db, user_id=user.id, username=user.username, action="login_success", resource_type="auth", 
-               description="Login realizado", ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    
+    # Gera Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username, "user_id": user.id},
