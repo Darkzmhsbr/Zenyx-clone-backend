@@ -1,4 +1,5 @@
 import os
+import enum
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -31,7 +32,17 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 # =========================================================
-# 👤 USUÁRIOS
+# 🆕 DEFINIÇÃO DE CARGOS (ADICIONE ISSO ABAIXO DOS IMPORTS)
+# =========================================================
+class UserRole(str, enum.Enum):
+    SUPER_ADMIN = "SUPER_ADMIN"
+    ADMIN = "ADMIN"
+    PARTNER = "PARTNER"
+    COLLABORATOR = "COLLABORATOR"
+    USER = "USER"
+
+# =========================================================
+# 👤 USUÁRIOS (VERSÃO FINAL FUNDIDA)
 # =========================================================
 class User(Base):
     __tablename__ = "users"
@@ -42,22 +53,24 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
     
+    # 🆕 NOVA COLUNA DE CARGO (Mantendo padrão USER)
+    role = Column(String, default="USER", nullable=False)
+
     is_active = Column(Boolean, default=True)
+    # Mantemos is_superuser por compatibilidade, mas o sistema vai priorizar a ROLE
     is_superuser = Column(Boolean, default=False)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # 🆕 NOVOS CAMPOS FINANCEIROS
+    # 💰 CAMPOS FINANCEIROS (MANTIDOS)
     pushin_pay_id = Column(String, nullable=True) # ID da conta do membro na Pushin
     taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
 
-    # RELACIONAMENTO: Um usuário possui vários bots
-    bots = relationship("Bot", back_populates="owner")
-    
-    # Relacionamentos de Logs e Notificações
+    # RELACIONAMENTOS (MANTIDOS)
+    bots = relationship("Bot", back_populates="owner", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="user")
-    notifications = relationship("Notification", back_populates="user") # 🔥 ADICIONADO PARA O SISTEMA DE NOTIFICAÇÃO
+    notifications = relationship("Notification", back_populates="user")
 
 # =========================================================
 # ⚙️ CONFIGURAÇÕES GERAIS

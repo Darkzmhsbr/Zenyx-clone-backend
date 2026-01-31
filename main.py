@@ -1528,7 +1528,22 @@ class Token(BaseModel):
     token_type: str
     user_id: int
     username: str
+    role: str       # <--- NOVO CAMPO
     has_bots: bool
+
+# 🆕 ADICIONE ESTE MODELO NOVO (Para usar em rotas de admin)
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    is_active: bool
+    is_superuser: bool
+    role: str = "USER"
+    has_bots: bool = False
+    
+    class Config:
+        from_attributes = True
 
 class TokenData(BaseModel):
     username: str = None
@@ -1673,6 +1688,28 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         return user
     finally:
         db.close()
+
+# =========================================================
+# 🛡️ DECORATOR DE PERMISSÃO (RBAC) - NOVO
+# =========================================================
+def require_role(allowed_roles: List[str]):
+    """
+    Bloqueia a rota se o usuário não tiver um dos cargos permitidos.
+    """
+    def role_checker(user: User = Depends(get_current_active_user)):
+        # 1. Super Admin (Legado ou Novo) tem passe livre
+        if user.role == "SUPER_ADMIN" or user.is_superuser:
+            return user
+            
+        # 2. Verifica se o cargo do usuário está na lista permitida
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=403, 
+                detail=f"Acesso negado. Necessário cargo: {allowed_roles}"
+            )
+        return user
+        
+    return role_checker
 
 # =========================================================
 # 👑 MIDDLEWARE: VERIFICAR SE É SUPER-ADMIN (🆕 FASE 3.4)
@@ -3968,14 +4005,12 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
     logger.info(f"🔑 LOGIN: Tentativa para '{user_data.username}'")
     logger.info(f"🔍 CAPTCHA RECEBIDO: {user_data.turnstile_token[:10]}..." if user_data.turnstile_token else "🔍 CAPTCHA: VAZIO/NONE")
 
-    # VERIFICAÇÃO TURNSTILE (Opcional no Login se estiver travando muito)
+    # VERIFICAÇÃO TURNSTILE
     if user_data.turnstile_token:
         if not await verify_turnstile(user_data.turnstile_token):
              logger.warning(f"❌ Login bloqueado: Captcha inválido para {user_data.username}")
              raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha).")
     else:
-        # Se quiser bloquear login sem captcha, descomente a linha abaixo:
-        # raise HTTPException(status_code=400, detail="Captcha obrigatório.")
         logger.warning("⚠️ Login sem captcha (Permitido temporariamente para teste)")
 
     # Busca usuário
@@ -3991,12 +4026,27 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
     
     # Login Sucesso
     has_bots = len(user.bots) > 0
-    logger.info(f"✅ LOGIN SUCESSO: {user.username} (SuperUser: {user.is_superuser})")
+    
+    # 🆕 DEFINIÇÃO INTELIGENTE DE ROLE (MIGRAÇÃO AUTOMÁTICA EM MEMÓRIA)
+    current_role = user.role
+    if user.is_superuser and user.role == "USER":
+        current_role = "SUPER_ADMIN"
+        
+    logger.info(f"✅ LOGIN SUCESSO: {user.username} (Role: {current_role})")
 
     # Gera Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    # IMPORTANTE: Garanta que sua função create_access_token suporte receber 'role'
+    # Se ela só recebe 'data', adicione a role no dicionário data:
+    token_payload = {
+        "sub": user.username, 
+        "user_id": user.id,
+        "role": current_role 
+    }
+    
     access_token = create_access_token(
-        data={"sub": user.username, "user_id": user.id},
+        data=token_payload,
         expires_delta=access_token_expires
     )
     
@@ -4005,6 +4055,7 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
         "token_type": "bearer",
         "user_id": user.id,
         "username": user.username,
+        "role": current_role,  # <--- RETORNA A ROLE NO JSON
         "has_bots": has_bots
     }
 
@@ -9219,6 +9270,50 @@ def promote_user_to_superadmin(
     except Exception as e:
         logger.error(f"Erro ao promover/rebaixar usuário: {e}")
         raise HTTPException(status_code=500, detail="Erro ao alterar status de super-admin")
+
+# =========================================================
+# 🕵️ SUPER ADMIN - LOGIN IMPERSONADO (LOGIN COMO)
+# =========================================================
+@app.post("/api/superadmin/impersonate/{user_id}")
+async def impersonate_user(
+    user_id: int, 
+    current_user: User = Depends(require_role(["SUPER_ADMIN"]))
+):
+    """
+    Gera um token válido para acessar a conta de QUALQUER usuário.
+    Apenas SUPER_ADMIN pode fazer isso.
+    """
+    db = SessionLocal()
+    try:
+        from database import User
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="Usuário alvo não encontrado")
+            
+        # Gera token para o alvo
+        access_token = create_access_token(
+            data={
+                "sub": target_user.username, 
+                "user_id": target_user.id,
+                "role": target_user.role
+            }
+        )
+        
+        has_bots = len(target_user.bots) > 0
+        
+        logger.warning(f"🕵️ IMPERSONATION: {current_user.username} entrou na conta de {target_user.username}")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": target_user.id,
+            "username": target_user.username,
+            "role": target_user.role,
+            "has_bots": has_bots,
+            "is_impersonation": True
+        }
+    finally:
+        db.close()
 
 # =========================================================
 # 🔔 ROTAS DE NOTIFICAÇÕES
