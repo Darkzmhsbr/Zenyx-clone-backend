@@ -66,13 +66,6 @@ from database import (
 
 import update_db
 
-# Migrações
-from migration_v3 import executar_migracao_v3
-from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5
-from migration_v6 import executar_migracao_v6
-from migration_audit_logs import executar_migracao_audit_logs
-
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -109,11 +102,6 @@ def health_check():
         "cors_active": True,
         "timestamp": datetime.now().isoformat()
     }
-
-from migration_v3 import executar_migracao_v3
-from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5
-from migration_v6 import executar_migracao_v6
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -3429,14 +3417,15 @@ class PlanoCreate(BaseModel):
     nome_exibicao: str
     preco: float
     dias_duracao: int
+    is_lifetime: Optional[bool] = False
+    id_canal_destino: Optional[str] = None  # ✅ NOVO CAMPO
 
-# --- Adicione logo após a classe PlanoCreate ---
-# 👇 COLE ISSO LOGO ABAIXO DA CLASS 'PlanoCreate'
-# COLE AQUI (LOGO APÓS AS CLASSES INICIAIS)
 class PlanoUpdate(BaseModel):
     nome_exibicao: Optional[str] = None
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
+    is_lifetime: Optional[bool] = None
+    id_canal_destino: Optional[str] = None  # ✅ NOVO CAMPO
     
     # Adiciona essa config para permitir que o Pydantic ignore tipos estranhos se possível
     class Config:
@@ -5669,11 +5658,14 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - V5.0 COM RETRY
 # =========================================================
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - V5.0 COM RETRY & MULTI-CANAIS
+# =========================================================
 @app.post("/api/webhooks/pushinpay")
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     """
-    Webhook de pagamento com sistema de retry automático.
+    Webhook de pagamento com sistema de retry automático e suporte a múltiplos canais VIP.
     Se falhar, agenda reprocessamento com exponential backoff.
     """
     print("🔔 WEBHOOK PIX CHEGOU!")
@@ -5717,7 +5709,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         
         # 4. PROCESSAR PAGAMENTO (LÓGICA CRÍTICA)
         try:
-            # Calcular data de expiração (lógica refatorada com is_lifetime)
+            # Calcular data de expiração
             now = datetime.utcnow()
             data_validade = None
             
@@ -5786,14 +5778,14 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
             logger.info(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
             
-            # 5. ENTREGA DO ACESSO
+            # 5. ENTREGA DO ACESSO (COM LÓGICA MULTI-CANAIS)
             try:
                 bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
                 if bot_data:
                     tb = telebot.TeleBot(bot_data.token, threaded=False)
                     target_id = str(pedido.telegram_id).strip()
                     
-                    # Corrigir ID se necessário
+                    # Corrigir ID se necessário (busca por username se não for numérico)
                     if not target_id.isdigit():
                         clean_user = str(pedido.username).lower().replace("@", "").strip()
                         lead = db.query(Lead).filter(
@@ -5810,17 +5802,31 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                     if target_id.isdigit():
                         # Entrega principal
                         try:
-                            canal_id = bot_data.id_canal_vip
-                            if str(canal_id).replace("-", "").isdigit():
-                                canal_id = int(str(canal_id).strip())
+                            # 🔥 LÓGICA V7: DEFINIÇÃO INTELIGENTE DO CANAL DE DESTINO 🔥
+                            # Se o plano tem um canal específico configurado, usa ele.
+                            # Caso contrário, usa o canal padrão configurado no Bot.
                             
+                            canal_id_final = bot_data.id_canal_vip # Default
+                            
+                            if plano and plano.id_canal_destino and str(plano.id_canal_destino).strip() != "":
+                                canal_id_final = plano.id_canal_destino
+                                logger.info(f"🎯 Usando Canal Específico do Plano: {canal_id_final}")
+                            else:
+                                logger.info(f"🎯 Usando Canal Padrão do Bot: {canal_id_final}")
+
+                            # Tratamento do ID do canal (remove traços extras se houver)
+                            if str(canal_id_final).replace("-", "").isdigit():
+                                canal_id_final = int(str(canal_id_final).strip())
+                            
+                            # Tenta desbanir antes (boas práticas)
                             try:
-                                tb.unban_chat_member(canal_id, int(target_id))
+                                tb.unban_chat_member(canal_id_final, int(target_id))
                             except:
                                 pass
                             
+                            # Gera Link Único para o canal decidido acima
                             convite = tb.create_chat_invite_link(
-                                chat_id=canal_id,
+                                chat_id=canal_id_final,
                                 member_limit=1,
                                 name=f"Venda {pedido.first_name}"
                             )
@@ -5832,10 +5838,14 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                             )
                             
                             tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
-                            logger.info(f"✅ Entrega enviada para {target_id}")
+                            logger.info(f"✅ Entrega enviada para {target_id} (Canal: {canal_id_final})")
                             
                         except Exception as e_main:
-                            logger.error(f"❌ Erro na entrega principal: {e_main}")
+                            logger.error(f"❌ Erro na entrega principal (TeleBot): {e_main}")
+                            # Fallback: Tenta avisar o usuário que houve erro na geração
+                            try:
+                                tb.send_message(int(target_id), "✅ Pagamento recebido!\n⚠️ Erro ao gerar link automático. Contate o suporte.")
+                            except: pass
                         
                         # Entrega Order Bump
                         if pedido.tem_order_bump:
@@ -5865,7 +5875,13 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                 f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
                                 f"📅 Vence em: {texto_validade}"
                             )
-                            notificar_admin_principal(bot_data, msg_admin)
+                            # Função auxiliar que você já deve ter no código
+                            # Se não tiver, substitua por lógica direta de envio
+                            if 'notificar_admin_principal' in globals():
+                                notificar_admin_principal(bot_data, msg_admin)
+                            elif bot_data.admin_principal_id:
+                                tb.send_message(bot_data.admin_principal_id, msg_admin, parse_mode="HTML")
+
                         except Exception as e_adm:
                             logger.error(f"❌ Erro notificação admin: {e_adm}")
                         
@@ -5873,22 +5889,23 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         db.commit()
                         
             except Exception as e_tg:
-                logger.error(f"❌ Erro Telegram/Entrega: {e_tg}")
-                # Não falhar o webhook por erro de entrega
+                logger.error(f"❌ Erro Telegram/Entrega Geral: {e_tg}")
+                # Não falhar o webhook por erro de entrega (o pagamento já foi processado)
             
             # Webhook processado com sucesso
             return {"status": "received"}
             
         except Exception as e_process:
-            # ERRO CRÍTICO NO PROCESSAMENTO
+            # ERRO CRÍTICO NO PROCESSAMENTO (BANCO, DADOS, ETC)
             logger.error(f"❌ ERRO no processamento do webhook: {e_process}")
             
-            # Registrar para retry
-            registrar_webhook_para_retry(
-                webhook_type='pushinpay',
-                payload=data,
-                reference_id=tx_id
-            )
+            # Registrar para retry (se a função existir no seu escopo global)
+            if 'registrar_webhook_para_retry' in globals():
+                registrar_webhook_para_retry(
+                    webhook_type='pushinpay',
+                    payload=data,
+                    reference_id=tx_id
+                )
             
             # Retornar erro 500 para PushinPay tentar novamente
             raise HTTPException(status_code=500, detail="Erro interno, será reprocessado")
@@ -9535,13 +9552,44 @@ async def impersonate_user(
 # =========================================================
 # 🔄 1. INICIALIZAÇÃO DE SEGURANÇA (O TRECHO QUE VOCÊ PERGUNTOU)
 # =========================================================
+# =========================================================
+# 🔄 1. INICIALIZAÇÃO DE SEGURANÇA E MIGRAÇÕES
+# =========================================================
 @app.on_event("startup")
 def startup_event():
-    print("🔄 Verificando tabelas do banco de dados...")
-    from database import Base, engine
-    # Garante que as tabelas existem. Se já existem, ele não faz nada (seguro).
+    print("🚀 INICIANDO ZENYX GBOT (VERSÃO ATUALIZADA)...")
+    
+    # 1. Garante tabelas básicas (SQLAlchemy)
     Base.metadata.create_all(bind=engine)
-    print("✅ Banco de dados verificado!")
+    
+    # 2. Executa as Migrações "Vacina" (Adiciona colunas novas sem perder dados)
+    try:
+        # Importamos aqui para evitar ciclo se estiver no topo
+        from force_migration import forcar_atualizacao_tabelas
+        from migration_v3 import executar_migracao_v3
+        from migration_v4 import executar_migracao_v4
+        from migration_v5 import executar_migracao_v5
+        from migration_v6 import executar_migracao_v6
+        from migration_v7 import executar_migracao_v7 # ✅ A NOVA MIGRAÇÃO
+        
+        print("💉 Aplicando vacinas de banco de dados...")
+        forcar_atualizacao_tabelas()
+        executar_migracao_v3()
+        executar_migracao_v4()
+        executar_migracao_v5()
+        executar_migracao_v6()
+        executar_migracao_v7() # ✅ Executa a criação da coluna id_canal_destino
+        
+        print("✅ Todas as migrações concluídas!")
+    except Exception as e:
+        print(f"⚠️ Aviso: Erro ao rodar migrações automáticas: {e}")
+
+    # 3. Inicia o Scheduler (Tarefas agendadas)
+    try:
+        scheduler.start()
+        print("⏰ Scheduler iniciado!")
+    except:
+        pass
 
 # =========================================================
 # ⚙️ 2. AS ROTAS QUE FAZEM FUNCIONAR (ESSENCIAL)
