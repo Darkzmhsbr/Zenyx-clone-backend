@@ -13,7 +13,7 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, desc, text, and_, or_
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware # <--- IMPORTANTE
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field 
 from sqlalchemy.orm import Session
@@ -37,7 +37,7 @@ from threading import Lock
 # ✅ IMPORTS CORRIGIDOS DO DATABASE (COM BASE)
 # =========================================================
 from database import (
-    Base,                 # <--- OBRIGATÓRIO: ISSO CORRIGE O ERRO "NameError"
+    Base,                 # <--- ESSENCIAL PARA O STARTUP
     SessionLocal, 
     init_db, 
     Bot as BotModel, 
@@ -71,29 +71,44 @@ from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
 from migration_v5 import executar_migracao_v5
 from migration_v6 import executar_migracao_v6
+from migration_audit_logs import executar_migracao_audit_logs
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =========================================================
-# 🚀 INICIALIZAÇÃO DA APP
+# 🚀 INICIALIZAÇÃO DA APP (A CORREÇÃO ESTÁ AQUI!)
 # =========================================================
-app = FastAPI(title="Zenyx Gbot SaaS Clone")
-
-# 🔓 CORS CONFIG - MODO LIBERADO (REGEX)
-# APLICADO LOGO NO INÍCIO PARA GARANTIR FUNCIONAMENTO
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=".*",      # <--- LIBERA TUDO (Login, Registro, Dashboard)
-    allow_credentials=True,       # <--- PERMITE O TOKEN DE LOGIN
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="Zenyx Gbot SaaS Clone",
+    version="5.0.2",
+    docs_url="/docs", 
+    redoc_url="/redoc"
 )
 
-@app.get("/")
-def health_check_root():
-    return {"status": "ok", "message": "Zenyx Clone Backend is Running!", "timestamp": datetime.now()}
+# 🛑 AVISO: O CORS TEM QUE SER A PRIMEIRA COISA AQUI!
+# Se isso ficar depois das rotas, o erro 405 acontece.
+app.add_middleware(
+    CORSMiddleware,
+    # Regex ".*" libera Vercel, Localhost, Railway, TUDO.
+    allow_origin_regex=".*",      
+    allow_credentials=True,       
+    allow_methods=["*"],    # Libera GET, POST, OPTIONS (Essencial), PUT, DELETE
+    allow_headers=["*"],    # Libera Authorization, Content-Type, etc
+)
+
+# =========================================================
+# 🏥 HEALTH CHECK (Para UptimeRobot e Debug)
+# =========================================================
+@app.get("/api/health")
+def health_check():
+    return {
+        "status": "online",
+        "service": "Zenyx Clone Backend",
+        "cors_active": True,
+        "timestamp": datetime.now().isoformat()
+    }
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
@@ -104,12 +119,6 @@ from migration_v6 import executar_migracao_v6
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Zenyx Gbot SaaS")
-
-@app.get("/")
-def health_check_root():
-    return {"status": "ok", "message": "Zenyx Clone Backend is Running!", "timestamp": datetime.now()}
-
 # =========================================================
 # ✅ VARIÁVEIS GLOBAIS PARA REMARKETING
 # =========================================================
@@ -117,8 +126,6 @@ def health_check_root():
 remarketing_lock = Lock()
 remarketing_timers = {}  # {chat_id: asyncio.Task}
 alternating_tasks = {}   # {chat_id: asyncio.Task}
-
-
 
 # ============================================================
 # 🎯 SISTEMA DE REMARKETING AUTOMÁTICO
@@ -1507,6 +1514,7 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+    # O backend PRECISA aceitar esse campo, senão dá erro 422 (Unprocessable Entity)
     turnstile_token: Optional[str] = None
 
 class PlatformUserUpdate(BaseModel):
