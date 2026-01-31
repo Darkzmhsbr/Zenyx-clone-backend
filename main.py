@@ -677,38 +677,55 @@ http_client = None
 # =========================================================
 # ⚙️ STARTUP OTIMIZADA (CORREÇÃO DO MESTRE)
 # =========================================================
+# =========================================================
+# ⚙️ STARTUP DEFINITIVO (SUBSTITUA POR ESTE BLOCO)
+# =========================================================
 @app.on_event("startup")
 def on_startup():
     print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS - MODO CLONE")
+    print("🚀 INICIANDO ZENYX GBOT SAAS")
     print("="*60)
     
+    # 1. Cria tabelas básicas e corrige estrutura
     try:
-        print("🏗️ 1. CONSTRUINDO TABELAS DO ZERO (CRÍTICO)...")
-        # ESTA LINHA É A MÁGICA. ELA TEM QUE SER A PRIMEIRA!
-        # Ela cria 'bots', 'leads', 'pedidos' se eles não existirem no banco vazio.
+        print("📊 Inicializando banco de dados...")
+        
+        # 🔥 PASSO 1: Cria as tabelas se não existirem
         Base.metadata.create_all(bind=engine)
-        print("✅ Tabelas estruturais criadas com sucesso!")
-
-        print("📊 2. Inicializando dados básicos...")
-        # Agora que as tabelas existem, podemos inserir dados iniciais
+        
+        # 🔥 PASSO 2: Inicializa dados básicos
         init_db()
         
-        print("🔧 3. Verificando atualizações de colunas (Migração)...")
-        # Só agora rodamos a verificação de colunas, pois as tabelas JÁ EXISTEM
+        # 🔥 PASSO 3: Força a verificação de colunas (Script de Auto-Fix)
+        print("🔧 Verificando integridade e colunas faltantes...")
         forcar_atualizacao_tabelas()
         
-        print("✅ Banco de dados 100% pronto e atualizado")
+        # ==============================================================================
+        # 🛠️ CORREÇÃO DE EMERGÊNCIA: CRIAR COLUNA ROLE (SQL DIRETO)
+        # ==============================================================================
+        # Isso resolve o erro de que a coluna 'role' não existe na tabela 'users'
+        try:
+            logger.info("🔧 Verificando coluna ROLE na tabela USERS...")
+            with engine.connect() as conn:
+                # O comando ADD COLUMN IF NOT EXISTS é seguro para rodar várias vezes
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR DEFAULT 'USER'"))
+                conn.commit()
+                logger.info("✅ Coluna ROLE verificada/criada com sucesso!")
+        except Exception as e:
+            logger.error(f"⚠️ Erro ao tentar criar coluna role: {e}")
+        # ==============================================================================
+
+        print("✅ Banco de dados inicializado e corrigido")
         
     except Exception as e:
-        logger.error(f"❌ ERRO CRÍTICO NO STARTUP: {e}")
+        logger.error(f"❌ ERRO CRÍTICO no init_db: {e}")
+        # Não paramos o app para tentar rodar o resto, mas logamos o erro grave
         import traceback
         traceback.print_exc()
-        # Não paramos o app, mas o erro ficará visível
-    
-    # --- BLOCO DE MIGRAÇÕES LEGADO (MANTIDO POR SEGURANÇA) ---
+
+    # 2. Executa migrações de versões (V3 a V6)
     try:
-        print("🔄 Executando verificações extras de versão...")
+        print("🔄 Executando migrações...")
         try:
             executar_migracao_v3()
         except: pass
@@ -724,11 +741,24 @@ def on_startup():
         try:
             executar_migracao_v6()
         except: pass
+        
+        print("✅ Migrações de versão concluídas")
             
     except Exception as e:
-        logger.error(f"❌ Erro nas migrações extras: {e}")
+        logger.error(f"❌ Erro geral nas migrações: {e}")
     
-    # 4. Configura pushin_pay_id
+    # 3. Executa migração de Audit Logs
+    try:
+        print("📋 Configurando Audit Logs...")
+        from migration_audit_logs import executar_migracao_audit_logs
+        executar_migracao_audit_logs()
+        print("✅ Audit Logs configurado")
+    except ImportError:
+        logger.warning("⚠️ Arquivo migration_audit_logs.py não encontrado, pulando.")
+    except Exception as e:
+        logger.warning(f"⚠️ Erro na migração Audit Logs: {e}")
+    
+    # 4. Configura pagamento (Pushin Pay ID)
     try:
         print("💳 Configurando sistema de pagamento...")
         db = SessionLocal()
@@ -738,15 +768,19 @@ def on_startup():
                 config = SystemConfig(key="pushin_plataforma_id", value="")
                 db.add(config)
                 db.commit()
+                print("✅ Configuração de pagamento criada")
+            else:
+                print("✅ Configuração de pagamento encontrada")
         finally:
             db.close()
     except Exception as e:
-        logger.warning(f"⚠️ Erro config pagamento: {e}")
+        logger.warning(f"⚠️ Erro ao configurar pushin_pay_id: {e}")
     
     print("="*60)
-    print("✅ SISTEMA INICIADO COM SUCESSO!")
+    print("✅ SISTEMA INICIADO E PRONTO!")
     print("="*60)
 
+    
 @app.on_event("shutdown")
 async def shutdown_event():
     """
@@ -9494,107 +9528,6 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "total_revenue": 0.0,
             "active_users": 0
         }
-# =========================================================
-# ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
-# =========================================================
-@app.on_event("startup")
-def on_startup():
-    print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS")
-    print("="*60)
-    
-    # 1. Cria tabelas básicas se não existirem
-    try:
-        print("📊 Inicializando banco de dados...")
-        
-        # 🔥 CORREÇÃO DO MESTRE: CRIA AS TABELAS PRIMEIRO!
-        # Isso garante que 'bots', 'users', etc. existam antes de qualquer alteração.
-        Base.metadata.create_all(bind=engine)
-        
-        # Chama o init_db padrão (caso tenha outras inicializações)
-        init_db()
-        
-        # 🔥 MESTRE CÓDIGO FÁCIL: CHAMADA DE CORREÇÃO FORÇADA
-        print("🔧 Verificando integridade e colunas faltantes...")
-        forcar_atualizacao_tabelas() # <--- Agora vai funcionar porque as tabelas já existem!
-        
-        print("✅ Banco de dados inicializado e corrigido")
-    except Exception as e:
-        logger.error(f"❌ ERRO CRÍTICO no init_db: {e}")
-        import traceback
-        traceback.print_exc()
-        # NÃO pare a aplicação aqui, continue tentando
-    
-    # 2. Executa migrações existentes (COM FALLBACK)
-    try:
-        print("🔄 Executando migrações...")
-        
-        # Tenta cada migração individualmente
-        try:
-            executar_migracao_v3()
-            print("✅ Migração v3 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v3 falhou: {e}")
-        
-        try:
-            executar_migracao_v4()
-            print("✅ Migração v4 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v4 falhou: {e}")
-        
-        try:
-            executar_migracao_v5()
-            print("✅ Migração v5 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v5 falhou: {e}")
-        
-        try:
-            executar_migracao_v6()
-            print("✅ Migração v6 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v6 falhou: {e}")
-            
-    except Exception as e:
-        logger.error(f"❌ Erro geral nas migrações: {e}")
-    
-    # 3. Executa migração de Audit Logs (COM FALLBACK)
-    try:
-        print("📋 Configurando Audit Logs...")
-        from migration_audit_logs import executar_migracao_audit_logs
-        executar_migracao_audit_logs()
-        print("✅ Audit Logs configurado")
-    except ImportError:
-        logger.warning("⚠️ Arquivo migration_audit_logs.py não encontrado")
-    except Exception as e:
-        logger.error(f"⚠️ Erro na migração Audit Logs: {e}")
-    
-    # 4. Configura pushin_pay_id (COM FALLBACK ROBUSTO)
-    try:
-        print("💳 Configurando sistema de pagamento...")
-        db = SessionLocal()
-        try:
-            config = db.query(SystemConfig).filter(
-                SystemConfig.key == "pushin_plataforma_id"
-            ).first()
-            
-            if not config:
-                config = SystemConfig(
-                    key="pushin_plataforma_id",
-                    value=""
-                )
-                db.add(config)
-                db.commit()
-                print("✅ Configuração de pagamento criada")
-            else:
-                print("✅ Configuração de pagamento encontrada")
-        finally:
-            db.close()
-    except Exception as e:
-        logger.warning(f"⚠️ Erro ao configurar pushin_pay_id: {e}")
-    
-    print("="*60)
-    print("✅ SISTEMA INICIADO E PRONTO!")
-    print("="*60)
 
 @app.get("/")
 def home():
