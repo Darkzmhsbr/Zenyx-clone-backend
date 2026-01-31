@@ -10,11 +10,10 @@ logger = logging.getLogger(__name__)
 
 def executar_migracao_v7():
     """
-    Adiciona a coluna 'id_canal_destino' na tabela planos_config.
-    Isso permite que um plano específico leve para um canal diferente do padrão do bot.
+    Adiciona a coluna 'id_canal_destino' na tabela 'plano_config'.
     """
     try:
-        # Pega a URL do ambiente ou usa sqlite local como fallback
+        # Pega a URL do ambiente
         DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sql_app.db")
         # Ajuste para Railway (postgres:// -> postgresql://)
         if DATABASE_URL.startswith("postgres://"):
@@ -22,13 +21,12 @@ def executar_migracao_v7():
 
         engine = create_engine(DATABASE_URL)
         
-        logger.info("🔄 [MIGRAÇÃO V7] Verificando coluna id_canal_destino em planos_config...")
+        logger.info("🔄 [MIGRAÇÃO V7] Verificando coluna id_canal_destino em 'plano_config'...")
         
         with engine.connect() as conn:
-            # Adiciona coluna 'id_canal_destino' (VARCHAR/String)
-            # Padrão é NULL (significa: use o canal do bot)
+            # 🎯 ALVO CORRETO: tabela "plano_config"
             sql_coluna = """
-            ALTER TABLE planos_config 
+            ALTER TABLE plano_config 
             ADD COLUMN IF NOT EXISTS id_canal_destino VARCHAR;
             """
             conn.execute(text(sql_coluna))
