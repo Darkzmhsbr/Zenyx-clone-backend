@@ -1454,11 +1454,15 @@ try:
 except Exception as e:
     print(f"Erro na migração forçada: {e}")
 
+# Permitir qualquer origem para evitar erro 502/403 no Clone
+origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=origins,  # Aceita requests do Vercel, Localhost, tudo.
+    allow_credentials=True,
+    allow_methods=["*"],    # Aceita GET, POST, OPTIONS, PUT, DELETE
+    allow_headers=["*"],    # Aceita qualquer cabeçalho
 )
 
 # =========================================================
