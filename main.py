@@ -780,7 +780,7 @@ def on_startup():
     print("✅ SISTEMA INICIADO E PRONTO!")
     print("="*60)
 
-    
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """
@@ -4001,10 +4001,10 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     from database import User 
 
     # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
-    # Comentado para evitar erro no auto-login (token queimado)
+    # Comentado para evitar erro no auto-login (token queimado durante testes)
     # if not await verify_turnstile(user_data.turnstile_token):  # ✅ AWAIT
     #      log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
-    #                description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
+    #                 description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
     #      raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
     # Validações normais
@@ -4019,11 +4019,15 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     # Cria novo usuário
     hashed_password = get_password_hash(user_data.password)
     
+    # Define role padrão como USER se não especificado
+    default_role = UserRole.USER if hasattr(UserRole, 'USER') else "USER"
+
     new_user = User(
         username=user_data.username,
         email=user_data.email,
         password_hash=hashed_password,
-        full_name=user_data.full_name
+        full_name=user_data.full_name,
+        role=default_role # Garante que role seja gravada
     )
     
     db.add(new_user)
@@ -4035,19 +4039,22 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
                resource_id=new_user.id, description=f"Novo usuário registrado: {new_user.username}", 
                details={"email": new_user.email}, ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     
-    # Gera token JWT
+    # Gera token JWT (AGORA COM ROLE)
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": new_user.username, "user_id": new_user.id},
+        # Inclui a role no payload do token
+        data={"sub": new_user.username, "user_id": new_user.id, "role": new_user.role.value if hasattr(new_user.role, 'value') else "USER"},
         expires_delta=access_token_expires
     )
     
+    # ✅ RETORNO CORRIGIDO (COM ROLE)
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "user_id": new_user.id,
         "username": new_user.username,
-        "has_bots": False
+        "has_bots": False,
+        "role": new_user.role.value if hasattr(new_user.role, 'value') else "USER" # Correção crítica
     }
     
 @app.post("/api/auth/login", response_model=Token)
