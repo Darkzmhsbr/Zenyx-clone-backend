@@ -1543,13 +1543,13 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     full_name: str = None
-    turnstile_token: Optional[str] = None
+    turnstile_token: Optional[str] = None # ✅ Fundamental para o Registro funcionar
 
 class UserLogin(BaseModel):
     username: str
     password: str
-    # O backend PRECISA aceitar esse campo, senão dá erro 422 (Unprocessable Entity)
-    turnstile_token: Optional[str] = None
+    # O backend PRECISA aceitar esse campo, senão dá erro 422 no Login
+    turnstile_token: Optional[str] = None 
 
 class PlatformUserUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -1562,10 +1562,10 @@ class Token(BaseModel):
     token_type: str
     user_id: int
     username: str
-    role: str       # <--- NOVO CAMPO
+    role: str       # ✅ OBRIGATÓRIO: O Frontend espera isso para liberar o menu
     has_bots: bool
 
-# 🆕 ADICIONE ESTE MODELO NOVO (Para usar em rotas de admin)
+# 🆕 MODELO DE RESPOSTA DE USUÁRIO (Para rotas de admin)
 class UserResponse(BaseModel):
     id: int
     username: str
@@ -1581,6 +1581,9 @@ class UserResponse(BaseModel):
 
 class TokenData(BaseModel):
     username: str = None
+    role: str = None # Opcional, mas útil para validação interna
+
+    
 # =========================================================
 # 🛡️ VERIFICAÇÃO DE CAPTCHA (BLINDADA)
 # =========================================================
@@ -3993,6 +3996,9 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
+# =========================================================
+# 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
+# =========================================================
 @app.post("/api/auth/register", response_model=Token)
 async def register(user_data: UserCreate, request: Request, db: Session = Depends(get_db)):  # ✅ ASYNC
     """
@@ -4019,8 +4025,8 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     # Cria novo usuário
     hashed_password = get_password_hash(user_data.password)
     
-    # Define role padrão como USER se não especificado
-    default_role = UserRole.USER if hasattr(UserRole, 'USER') else "USER"
+    # ✅ CORREÇÃO: Define role padrão como string "USER" diretamente para evitar erro de importação
+    default_role = "USER"
 
     new_user = User(
         username=user_data.username,
@@ -4043,7 +4049,7 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         # Inclui a role no payload do token
-        data={"sub": new_user.username, "user_id": new_user.id, "role": new_user.role.value if hasattr(new_user.role, 'value') else "USER"},
+        data={"sub": new_user.username, "user_id": new_user.id, "role": default_role},
         expires_delta=access_token_expires
     )
     
@@ -4054,7 +4060,7 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
         "user_id": new_user.id,
         "username": new_user.username,
         "has_bots": False,
-        "role": new_user.role.value if hasattr(new_user.role, 'value') else "USER" # Correção crítica
+        "role": default_role # Retorna a role correta para o frontend
     }
     
 @app.post("/api/auth/login", response_model=Token)
