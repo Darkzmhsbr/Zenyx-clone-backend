@@ -1532,45 +1532,45 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: str = None
-
 # =========================================================
-# 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
+# 🛡️ VERIFICAÇÃO DE CAPTCHA (BLINDADA)
 # =========================================================
-TURNSTILE_SECRET_KEY = "0x4AAAAAACV1UU5BKfJ9uPHPbBc5bsF5BKo"
+async def verify_turnstile(token: str):
+    """
+    Verifica o token do Turnstile diretamente com a Cloudflare.
+    Usa um cliente HTTP local para evitar erros de 'NoneType'.
+    """
+    secret = os.getenv("TURNSTILE_SECRET_KEY")
+    
+    # Se não tiver chave configurada, libera (Modo Dev)
+    if not secret:
+        logger.warning("⚠️ TURNSTILE_SECRET_KEY não configurada. Pulando verificação.")
+        return True
 
-async def verify_turnstile(token: str) -> bool:
-    """
-    Valida token do Cloudflare Turnstile.
-    Timeout de 5 segundos para não travar o registro.
-    """
-    if not token:
-        return False
-    
-    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "0x4AAAAAACV1UU5BKfJ9uPHPbBc5bsF5BKo")
-    
-    payload = {
-        "secret": secret_key,
-        "response": token
-    }
-    
     try:
-        response = await http_client.post(
-            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-            data=payload,
-            timeout=5.0
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False)
-        
-        return False
-        
-    except httpx.TimeoutException:
-        print("⚠️ Timeout na validação Turnstile")
-        return False
+        # 🔥 AQUI ESTÁ A CORREÇÃO: Criamos o client na hora (Context Manager)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={
+                    "secret": secret,
+                    "response": token
+                },
+                timeout=5.0 # Timeout de segurança
+            )
+            
+            data = response.json()
+            success = data.get("success", False)
+            
+            if not success:
+                logger.warning(f"❌ Falha Cloudflare: {data.get('error-codes')}")
+            
+            return success
+
     except Exception as e:
-        print(f"❌ Erro Turnstile: {str(e)}")
+        logger.error(f"❌ Erro fatal ao conectar com Cloudflare: {e}")
+        # Em caso de erro de conexão, podemos optar por bloquear ou liberar.
+        # Por segurança, retornamos False.
         return False
         
 # =========================================================
