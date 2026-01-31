@@ -9288,6 +9288,131 @@ def delete_user(
         logger.error(f"Erro ao deletar usuário: {e}")
         raise HTTPException(status_code=500, detail="Erro ao deletar usuário")
 
+# =========================================================
+# 🤖 GESTÃO DE BOTS DO SISTEMA (SUPER ADMIN)
+# =========================================================
+@app.get("/api/superadmin/bots")
+def list_all_bots_system(
+    page: int = 1,
+    per_page: int = 50,
+    search: str = None,
+    status: str = None,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Lista TODOS os bots do sistema (visão global).
+    Permite filtrar por nome do bot, username do bot ou username do DONO.
+    """
+    try:
+        # Importação dos modelos necessários
+        from database import Bot as BotModel, User, Pedido
+        
+        # Limita paginação
+        if per_page > 100: per_page = 100
+        
+        # Query base: Traz Bots e junta com a tabela Users (para saber quem é o dono)
+        query = db.query(BotModel).join(User, BotModel.owner_id == User.id)
+        
+        # 🔍 Filtro de Busca (Nome do Bot, User do Bot ou Nome do Dono)
+        if search:
+            search_term = f"%{search}%"
+            query = query.filter(
+                (BotModel.nome.ilike(search_term)) |
+                (BotModel.username.ilike(search_term)) |
+                (User.username.ilike(search_term)) |  # Busca pelo dono também!
+                (User.email.ilike(search_term))
+            )
+        
+        # Filtro de Status
+        if status and status != "todos":
+            query = query.filter(BotModel.status == status)
+            
+        # Contagem total para paginação
+        total = query.count()
+        
+        # Ordenação e Paginação
+        bots = query.order_by(BotModel.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+        
+        # Formata a resposta
+        bots_data = []
+        for bot in bots:
+            # Calcula receita total deste bot
+            receita = db.query(func.sum(Pedido.valor)).filter(
+                Pedido.bot_id == bot.id,
+                Pedido.status.in_(['approved', 'paid'])
+            ).scalar() or 0.0
+            
+            # Conta vendas
+            vendas = db.query(Pedido).filter(
+                Pedido.bot_id == bot.id,
+                Pedido.status.in_(['approved', 'paid'])
+            ).count()
+
+            bots_data.append({
+                "id": bot.id,
+                "nome": bot.nome,
+                "username": bot.username,
+                "status": bot.status,
+                "created_at": bot.created_at.isoformat() if bot.created_at else None,
+                # Dados do Dono (Essencial para o Super Admin)
+                "owner": {
+                    "id": bot.owner.id,
+                    "username": bot.owner.username,
+                    "email": bot.owner.email
+                },
+                # Métricas financeiras
+                "revenue": float(receita),
+                "sales": vendas
+            })
+            
+        return {
+            "data": bots_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+
+    except Exception as e:
+        logger.error(f"Erro ao listar bots do sistema: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao buscar lista de bots")
+
+# 🗑️ Rota para Deletar Bot via Super Admin (Forçado)
+@app.delete("/api/superadmin/bots/{bot_id}")
+def delete_bot_force(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    try:
+        from database import Bot as BotModel
+        
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+            
+        nome_bot = bot.nome
+        dono = bot.owner.username if bot.owner else "Desconhecido"
+        
+        # Deleta o bot
+        db.delete(bot)
+        db.commit()
+        
+        # Log de Auditoria
+        log_action(db=db, user_id=current_superuser.id, username=current_superuser.username, 
+                   action="bot_deleted_force", resource_type="bot", resource_id=bot_id,
+                   description=f"Super Admin deletou bot '{nome_bot}' do usuário '{dono}'", 
+                   success=True, ip_address=get_client_ip(request))
+                   
+        return {"message": "Bot deletado com sucesso"}
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao deletar bot forçado: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao deletar bot")
+
 @app.put("/api/superadmin/users/{user_id}/promote")
 def promote_user_to_superadmin(
     user_id: int,
