@@ -40,9 +40,10 @@ from threading import Lock
 # ✅ IMPORTS CORRIGIDOS DO DATABASE
 # =========================================================
 from database import (
+    Base,                 # <--- ADICIONE ESTE AQUI! (Obrigatório para o startup)
     SessionLocal, 
     init_db, 
-    Bot as BotModel,  # ← RENOMEADO para evitar conflito com TeleBot
+    Bot as BotModel, 
     PlanoConfig, 
     BotFlow, 
     BotFlowStep, 
@@ -59,15 +60,15 @@ from database import (
     AuditLog, 
     Notification, 
     User, 
-    engine,
+    engine,               # O engine já estava aqui, perfeito.
     WebhookRetry,
     # ✅ NOVOS IMPORTS PARA REMARKETING AUTOMÁTICO
     RemarketingConfig,
-    AlternatingMessages,  # ✅ NOME CORRETO
-    RemarketingLog        # ✅ NOME CORRETO
+    AlternatingMessages, 
+    RemarketingLog 
 )
 
-import update_db 
+import update_db
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
