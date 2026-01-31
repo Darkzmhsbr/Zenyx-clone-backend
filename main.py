@@ -9408,8 +9408,20 @@ async def impersonate_user(
         db.close()
 
 # =========================================================
-# ⚙️ CONFIGURAÇÕES GLOBAIS E BROADCAST (DB VERSION)
+# 🔄 1. INICIALIZAÇÃO DE SEGURANÇA (O TRECHO QUE VOCÊ PERGUNTOU)
 # =========================================================
+@app.on_event("startup")
+def startup_event():
+    print("🔄 Verificando tabelas do banco de dados...")
+    from database import Base, engine
+    # Garante que as tabelas existem. Se já existem, ele não faz nada (seguro).
+    Base.metadata.create_all(bind=engine)
+    print("✅ Banco de dados verificado!")
+
+# =========================================================
+# ⚙️ 2. AS ROTAS QUE FAZEM FUNCIONAR (ESSENCIAL)
+# =========================================================
+# Se você já tiver colado isso antes, verifique se está IGUAL a este abaixo
 
 class SystemConfigSchema(BaseModel):
     default_fee: int = 60
@@ -9419,24 +9431,17 @@ class SystemConfigSchema(BaseModel):
 class BroadcastSchema(BaseModel):
     title: str
     message: str
-    type: str = "info" # info, success, warning
+    type: str = "info" 
 
 @app.get("/api/admin/config")
-def get_global_config(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
+def get_global_config(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
     from database import SystemConfig
-    
-    # Busca todas as configs do banco
     configs = db.query(SystemConfig).all()
-    # Transforma lista [key, value] em dicionário {key: value}
     config_map = {c.key: c.value for c in configs}
     
-    # Retorna com conversão de tipos (tudo no banco é string)
     return {
         "default_fee": int(config_map.get("default_fee", 60)),
         "master_pushin_pay_id": config_map.get("master_pushin_pay_id", ""),
@@ -9444,86 +9449,40 @@ def get_global_config(
     }
 
 @app.post("/api/admin/config")
-def update_global_config(
-    config: SystemConfigSchema, 
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
+def update_global_config(config: SystemConfigSchema, request: Request, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
     from database import SystemConfig
     
-    # Função auxiliar para criar ou atualizar (Upsert)
-    def upsert_config(key: str, value: str):
+    def upsert(key, value):
         item = db.query(SystemConfig).filter(SystemConfig.key == key).first()
-        if item:
-            item.value = value
-        else:
-            item = SystemConfig(key=key, value=value)
-            db.add(item)
+        if item: item.value = value
+        else: db.add(SystemConfig(key=key, value=value))
     
     try:
-        # Salva cada campo no banco
-        upsert_config("default_fee", str(config.default_fee))
-        upsert_config("master_pushin_pay_id", config.master_pushin_pay_id)
-        upsert_config("maintenance_mode", "true" if config.maintenance_mode else "false")
-        
+        upsert("default_fee", str(config.default_fee))
+        upsert("master_pushin_pay_id", config.master_pushin_pay_id)
+        upsert("maintenance_mode", "true" if config.maintenance_mode else "false")
         db.commit()
-        
-        # Log de Auditoria
-        log_action(db=db, user_id=current_user.id, username=current_user.username, 
-                   action="config_updated", resource_type="system", 
-                   description="Atualizou configurações globais (Via Banco de Dados)", 
-                   success=True, ip_address=get_client_ip(request))
-        
-        return {"message": "Configurações salvas no banco com sucesso!"}
-        
+        return {"message": "Salvo com sucesso!"}
     except Exception as e:
         db.rollback()
-        logger.error(f"Erro ao salvar configs globais: {e}")
-        raise HTTPException(status_code=500, detail="Erro ao salvar configurações")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/admin/broadcast")
-def send_broadcast(
-    broadcast: BroadcastSchema, 
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """
-    Envia uma notificação para TODOS os usuários do sistema.
-    """
+def send_broadcast(broadcast: BroadcastSchema, request: Request, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     from database import Notification, User
     
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    # 1. Busca todos os usuários ativos
     users = db.query(User).filter(User.is_active == True).all()
-    count = 0
-    
-    # 2. Cria notificação para cada um
     for user in users:
-        notif = Notification(
-            user_id=user.id,
-            title=broadcast.title,
-            message=broadcast.message,
-            type=broadcast.type,
-            read=False
-        )
-        db.add(notif)
-        count += 1
+        db.add(Notification(user_id=user.id, title=broadcast.title, message=broadcast.message, type=broadcast.type))
     
     db.commit()
-    
-    log_action(db=db, user_id=current_user.id, username=current_user.username, 
-               action="broadcast_sent", resource_type="system", 
-               description=f"Enviou broadcast para {count} usuários: {broadcast.title}", 
-               success=True, ip_address=get_client_ip(request))
-    
-    return {"message": f"Mensagem enviada para {count} usuários com sucesso!"}
+    return {"message": f"Enviado para {len(users)} usuários!"}
 
 
 # =========================================================
