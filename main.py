@@ -80,6 +80,10 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
 
+@app.get("/")
+def health_check_root():
+    return {"status": "ok", "message": "Zenyx Clone Backend is Running!", "timestamp": datetime.now()}
+
 # =========================================================
 # ✅ VARIÁVEIS GLOBAIS PARA REMARKETING
 # =========================================================
@@ -1454,15 +1458,12 @@ try:
 except Exception as e:
     print(f"Erro na migração forçada: {e}")
 
-# Permitir qualquer origem para evitar erro 502/403 no Clone
-origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Aceita requests do Vercel, Localhost, tudo.
-    allow_credentials=True,
-    allow_methods=["*"],    # Aceita GET, POST, OPTIONS, PUT, DELETE
-    allow_headers=["*"],    # Aceita qualquer cabeçalho
+    allow_origin_regex=".*",      # <--- ESSA É A CHAVE DA CORREÇÃO
+    allow_credentials=True,       # Necessário para cookies/auth
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # =========================================================
