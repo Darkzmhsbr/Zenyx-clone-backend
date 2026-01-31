@@ -1535,20 +1535,26 @@ class TokenData(BaseModel):
 # =========================================================
 # 🛡️ VERIFICAÇÃO DE CAPTCHA (BLINDADA)
 # =========================================================
+# =========================================================
+# 🛡️ VERIFICAÇÃO DE CAPTCHA (CORREÇÃO DO ERRO NONETYPE)
+# =========================================================
 async def verify_turnstile(token: str):
     """
     Verifica o token do Turnstile diretamente com a Cloudflare.
-    Usa um cliente HTTP local para evitar erros de 'NoneType'.
+    Cria um cliente HTTP novo para cada requisição para evitar erros de conexão.
     """
     secret = os.getenv("TURNSTILE_SECRET_KEY")
     
-    # Se não tiver chave configurada, libera (Modo Dev)
+    # Debug: Mostra no log se a chave foi lida (mas esconde os caracteres finais)
     if not secret:
-        logger.warning("⚠️ TURNSTILE_SECRET_KEY não configurada. Pulando verificação.")
-        return True
+        logger.warning("⚠️ TURNSTILE_SECRET_KEY não configurada no Railway!")
+        return False # Bloqueia se não tiver chave
+    else:
+        logger.info(f"🔑 Chave Secreta detectada: {secret[:5]}...")
 
     try:
-        # 🔥 AQUI ESTÁ A CORREÇÃO: Criamos o client na hora (Context Manager)
+        # 🔥 AQUI ESTÁ A CORREÇÃO DO ERRO 'NoneType':
+        # Usamos 'async with' para criar o client na hora exata do uso.
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
@@ -1556,21 +1562,21 @@ async def verify_turnstile(token: str):
                     "secret": secret,
                     "response": token
                 },
-                timeout=5.0 # Timeout de segurança
+                timeout=10.0 # Aumentei o timeout para garantir
             )
             
             data = response.json()
             success = data.get("success", False)
             
             if not success:
-                logger.warning(f"❌ Falha Cloudflare: {data.get('error-codes')}")
+                logger.warning(f"❌ Cloudflare recusou: {data.get('error-codes')}")
+            else:
+                logger.info("✅ Cloudflare aprovou o token!")
             
             return success
 
     except Exception as e:
-        logger.error(f"❌ Erro fatal ao conectar com Cloudflare: {e}")
-        # Em caso de erro de conexão, podemos optar por bloquear ou liberar.
-        # Por segurança, retornamos False.
+        logger.error(f"❌ Erro de conexão com Cloudflare: {e}")
         return False
         
 # =========================================================
