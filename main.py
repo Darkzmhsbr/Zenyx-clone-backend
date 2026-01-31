@@ -1583,7 +1583,7 @@ class TokenData(BaseModel):
     username: str = None
     role: str = None # Opcional, mas útil para validação interna
 
-    
+
 # =========================================================
 # 🛡️ VERIFICAÇÃO DE CAPTCHA (BLINDADA)
 # =========================================================
@@ -4064,16 +4064,23 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     }
     
 @app.post("/api/auth/login", response_model=Token)
-async def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
+async def login(
+    user_data: UserLogin, 
+    request: Request, 
+    db: Session = Depends(get_db)
+):
     from database import User
     
     logger.info(f"🔑 LOGIN: Tentativa para '{user_data.username}'")
     logger.info(f"🔍 CAPTCHA RECEBIDO: {user_data.turnstile_token[:10]}..." if user_data.turnstile_token else "🔍 CAPTCHA: VAZIO/NONE")
 
-    # VERIFICAÇÃO TURNSTILE
+    # VERIFICAÇÃO TURNSTILE (Opcional por enquanto)
     if user_data.turnstile_token:
         if not await verify_turnstile(user_data.turnstile_token):
              logger.warning(f"❌ Login bloqueado: Captcha inválido para {user_data.username}")
+             # 📋 AUDITORIA: Captcha Falhou
+             log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
+                        description="Login bloqueado: Falha no Captcha", success=False, ip_address=get_client_ip(request))
              raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha).")
     else:
         logger.warning("⚠️ Login sem captcha (Permitido temporariamente para teste)")
@@ -4081,29 +4088,48 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
     # Busca usuário
     user = db.query(User).filter(User.username == user_data.username).first()
     
+    # ❌ USUÁRIO NÃO ENCONTRADO
     if not user:
         logger.warning(f"❌ Usuário não encontrado: {user_data.username}")
+        # 📋 AUDITORIA: Usuário Inexistente
+        log_action(db=db, user_id=None, username=user_data.username, action="login_failed", resource_type="auth", 
+                   description="Tentativa de login: Usuário não existe", success=False, ip_address=get_client_ip(request))
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
         
+    # ❌ SENHA INCORRETA
     if not verify_password(user_data.password, user.password_hash):
         logger.warning(f"❌ Senha incorreta para: {user_data.username}")
+        # 📋 AUDITORIA: Senha Errada
+        log_action(db=db, user_id=user.id, username=user.username, action="login_failed", resource_type="auth", 
+                   description="Tentativa de login: Senha incorreta", success=False, ip_address=get_client_ip(request))
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     
     # Login Sucesso
     has_bots = len(user.bots) > 0
     
-    # 🆕 DEFINIÇÃO INTELIGENTE DE ROLE (MIGRAÇÃO AUTOMÁTICA EM MEMÓRIA)
+    # 🆕 DEFINIÇÃO INTELIGENTE DE ROLE
     current_role = user.role
     if user.is_superuser and user.role == "USER":
         current_role = "SUPER_ADMIN"
         
     logger.info(f"✅ LOGIN SUCESSO: {user.username} (Role: {current_role})")
 
+    # 📋 AUDITORIA: SUCESSO (O MAIS IMPORTANTE)
+    log_action(
+        db=db, 
+        user_id=user.id, 
+        username=user.username, 
+        action="login_success", 
+        resource_type="auth", 
+        description="Login realizado com sucesso", 
+        success=True, 
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+
     # Gera Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
-    # IMPORTANTE: Garanta que sua função create_access_token suporte receber 'role'
-    # Se ela só recebe 'data', adicione a role no dicionário data:
     token_payload = {
         "sub": user.username, 
         "user_id": user.id,
@@ -4120,10 +4146,11 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
         "token_type": "bearer",
         "user_id": user.id,
         "username": user.username,
-        "role": current_role,  # <--- RETORNA A ROLE NO JSON
+        "role": current_role,  # Retorna a role no JSON
         "has_bots": has_bots
     }
 
+    
 # =========================================================
 # 💓 HEALTH CHECK PARA MONITORAMENTO
 # =========================================================
