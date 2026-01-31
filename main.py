@@ -1615,7 +1615,7 @@ class UserDetailsResponse(BaseModel):
     total_revenue: float
     total_sales: int
 
-# ========================================================
+# =========================================================
 # 1. FUNÇÃO DE CONEXÃO COM BANCO (TEM QUE SER A PRIMEIRA)
 # =========================================================
 def get_db():
@@ -1625,8 +1625,9 @@ def get_db():
         yield db
     finally:
         db.close()
+
 # =========================================================
-# 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO (CORRIGIDAS)
+# 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO
 # =========================================================
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica se a senha está correta"""
@@ -1647,6 +1648,10 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     else:
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
+    # Garantia de Role (RBAC) para o Token
+    if "role" not in to_encode:
+        to_encode["role"] = "USER"
+
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -1690,12 +1695,25 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         db.close()
 
 # =========================================================
+# 🛡️ FUNÇÃO QUE FALTAVA (VERIFICA SE USUÁRIO ESTÁ ATIVO)
+# =========================================================
+def get_current_active_user(current_user: User = Depends(get_current_user)):
+    """
+    Verifica se o usuário logado está ativo.
+    Essencial para o sistema de Roles funcionar e evita o crash.
+    """
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Usuário inativo")
+    return current_user
+
+# =========================================================
 # 🛡️ DECORATOR DE PERMISSÃO (RBAC) - NOVO
 # =========================================================
 def require_role(allowed_roles: List[str]):
     """
     Bloqueia a rota se o usuário não tiver um dos cargos permitidos.
     """
+    # AGORA VAI FUNCIONAR POIS get_current_active_user JÁ FOI DEFINIDA ACIMA
     def role_checker(user: User = Depends(get_current_active_user)):
         # 1. Super Admin (Legado ou Novo) tem passe livre
         if user.role == "SUPER_ADMIN" or user.is_superuser:
@@ -1712,12 +1730,12 @@ def require_role(allowed_roles: List[str]):
     return role_checker
 
 # =========================================================
-# 👑 MIDDLEWARE: VERIFICAR SE É SUPER-ADMIN (🆕 FASE 3.4)
+# 👑 MIDDLEWARE: VERIFICAR SE É SUPER-ADMIN
 # =========================================================
-async def get_current_superuser(current_user = Depends(get_current_user)):
+async def get_current_superuser(current_user: User = Depends(get_current_active_user)):
     """
     Verifica se o usuário logado é um super-administrador.
-    Retorna o usuário se for super-admin, caso contrário levanta HTTPException 403.
+    Usa get_current_active_user para garantir que ele também está ativo.
     """
     if not current_user.is_superuser:
         raise HTTPException(
